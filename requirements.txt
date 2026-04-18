@@ -4,3 +4,4 @@ pycountry
 requests
 SpeechRecognition
 streamlit-mic-recorder
+firebase-admin
