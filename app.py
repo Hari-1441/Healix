@@ -725,73 +725,7 @@ else:
 
         st.markdown("</div>", unsafe_allow_html=True)
         
-# ---------------- PAGE: PROFILE (PATIENT SIDE) ----------------
-    if st.session_state.page == "Profile":
-        st.subheader("👤 Profile Settings")
 
-        countries = sorted([c.name for c in pycountry.countries])
-
-        curr_country = st.session_state.get("country", "India")
-        curr_state = st.session_state.get("state", "")
-        curr_phone = st.session_state.get("phone", "")
-        curr_age = st.session_state.get("age", 25)
-        curr_gender = st.session_state.get("gender", "Male")
-
-        country = st.selectbox(
-            "🌍 Country",
-            countries,
-            index=countries.index(curr_country)
-            if curr_country in countries else 0
-        )
-
-        state = st.text_input("📍 State / Region", value=curr_state)
-        phone = st.text_input("📞 Phone Number", value=curr_phone)
-        age = st.number_input("🎂 Age", 1, 120, value=int(curr_age))
-
-        gender = st.selectbox(
-            "⚧ Gender",
-            ["Male", "Female", "Other"],
-            index=["Male", "Female", "Other"].index(curr_gender)
-        )
-
-        if st.button("Update Profile"):
-
-            if state.strip() == "" or not phone.isdigit():
-                st.error("Please provide valid state and phone number")
-
-            else:
-                import random
-
-                if "patient_id" not in st.session_state:
-                    st.session_state.patient_id = str(
-                        random.randint(1000, 9999)
-                    )
-
-                save_profile(
-                    st.session_state.username,
-                    phone,
-                    country,
-                    state,
-                    age,
-                    gender,
-                    st.session_state.patient_id
-                )
-
-                st.session_state.profile_complete = True
-                st.session_state.phone = phone
-                st.session_state.country = country
-                st.session_state.state = state
-                st.session_state.age = age
-                st.session_state.gender = gender
-                st.session_state.page = "Dashboard"
-
-                st.success(
-                    f"✅ Profile Updated! "
-                    f"Your Unique Patient ID is: "
-                    f"{st.session_state.patient_id}"
-                )
-
-                st.rerun()
 
 # ---------------- PAGE: PROFILE (PATIENT SIDE) ----------------
     if st.session_state.page == "Profile":
