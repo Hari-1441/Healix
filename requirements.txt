@@ -1,0 +1,6 @@
+streamlit
+pandas
+pycountry
+requests
+SpeechRecognition
+streamlit-mic-recorder
