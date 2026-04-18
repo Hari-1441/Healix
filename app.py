@@ -6,59 +6,106 @@ import pycountry
 from datetime import datetime
 import requests
 import speech_recognition as sr
+import firebase_admin
+from firebase_admin import credentials, firestore
 
+# ---------------- FIREBASE INIT ----------------
+if not firebase_admin._apps:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    key_path = os.path.join(BASE_DIR, "firebase-key.json")
+
+    cred = credentials.Certificate(key_path)
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
 GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 st.set_page_config(page_title="Health AI", layout="wide")
 
-PROFILE_FILE = "profiles.csv"
-USER_FILE = "users.csv"
-MED_FILE = "medications.csv"
-NOTE_FILE = "notes.csv"
-DOCTOR_FILE = "doctors.csv"
 
 
 
 # ---------------- FUNCTIONS ----------------
 def load_profiles():
-    if os.path.exists(PROFILE_FILE):
-        df = pd.read_csv(PROFILE_FILE)
-        # Ensure all required columns exist including patient_id
-        cols = ["user","phone","country","state","age","gender","patient_id"]
-        for col in cols:
-            if col not in df.columns: df[col] = ""
-        return df
-    return pd.DataFrame(columns=["user","phone","country","state","age","gender","patient_id"])
+    docs = db.collection("profiles").stream()
 
+    rows = []
+    for doc in docs:
+        rows.append(doc.to_dict())
+
+    if rows:
+        return pd.DataFrame(rows)
+
+    return pd.DataFrame(columns=[
+        "user",
+        "phone",
+        "country",
+        "state",
+        "age",
+        "gender",
+        "patient_id"
+    ])
+    
 def save_profile(username, phone, country, state, age, gender, p_id):
-    df = load_profiles()
-    df = df[df["user"] != username]
-    new = pd.DataFrame([[username, phone, country, state, age, gender, p_id]],
-        columns=["user","phone","country","state","age","gender","patient_id"])
-    df = pd.concat([df, new], ignore_index=True)
-    df.to_csv(PROFILE_FILE, index=False)
-
+    db.collection("profiles").document(username).set({
+        "user": username,
+        "phone": phone,
+        "country": country,
+        "state": state,
+        "age": age,
+        "gender": gender,
+        "patient_id": p_id
+    })
+    
 def load_notes():
-    if os.path.exists(NOTE_FILE):
-        return pd.read_csv(NOTE_FILE)
-    return pd.DataFrame(columns=["user","day","note","tag","time"])
+    docs = db.collection("notes").stream()
+
+    rows = []
+    for doc in docs:
+        rows.append(doc.to_dict())
+
+    if rows:
+        return pd.DataFrame(rows)
+
+    return pd.DataFrame(columns=[
+        "user",
+        "day",
+        "note",
+        "tag",
+        "time"
+    ])
+
+def save_notes(df):
+    current_user = st.session_state.username
+
+    docs = db.collection("notes").where("user", "==", current_user).stream()
+
+    for d in docs:
+        d.reference.delete()
+
+    user_df = df[df["user"] == current_user]
+
+    for _, row in user_df.iterrows():
+        db.collection("notes").add(row.to_dict())
 
 def save_doctor(doc_id, password, name, hospital_code):
-    if os.path.exists(DOCTOR_FILE):
-        df = pd.read_csv(DOCTOR_FILE)
-    else:
-        df = pd.DataFrame(columns=["doc_id", "password", "name", "h_code"])
-    
-    new_doc = pd.DataFrame([[doc_id, password, name, hospital_code]], 
-                           columns=["doc_id", "password", "name", "h_code"])
-    pd.concat([df, new_doc], ignore_index=True).to_csv(DOCTOR_FILE, index=False)
+    db.collection("doctors").document(doc_id).set({
+        "doc_id": doc_id,
+        "password": password,
+        "name": name,
+        "h_code": hospital_code
+    })
+
+
+
 
 def check_doctor_login(doc_id, password):
-    if not os.path.exists(DOCTOR_FILE):
-        return False
-    df = pd.read_csv(DOCTOR_FILE)
-    # Ensure we compare as strings to avoid issues with IDs
-    return ((df["doc_id"].astype(str) == str(doc_id)) & (df["password"].astype(str) == str(password))).any()
+    doc = db.collection("doctors").document(doc_id).get()
 
+    if doc.exists:
+        data = doc.to_dict()
+        return data["password"] == password
+
+    return False
 
 def valid_username(username):
     return len(username) >= 4 and username.isalnum()
@@ -67,32 +114,69 @@ def valid_password(password):
     return (len(password) >= 6 and re.search("[A-Z]", password) and re.search("[0-9]", password))
 
 def save_user(username, password):
-    if os.path.exists(USER_FILE):
-        df = pd.read_csv(USER_FILE)
-        if username in df["username"].values:
-            return False
-        df = pd.concat([df, pd.DataFrame([[username, password]], columns=["username", "password"])])
-    else:
-        df = pd.DataFrame([[username, password]], columns=["username", "password"])
-    df.to_csv(USER_FILE, index=False)
+    user_ref = db.collection("users").document(username)
+
+    if user_ref.get().exists:
+        return False
+
+    user_ref.set({
+        "username": username,
+        "password": password
+    })
     return True
 
 def check_login(username, password):
-    if not os.path.exists(USER_FILE):
-        return False
-    df = pd.read_csv(USER_FILE)
-    return ((df["username"] == username) & (df["password"] == password)).any()
+    doc = db.collection("users").document(username).get()
+
+    if doc.exists:
+        data = doc.to_dict()
+        return data["password"] == password
+
+    return False
 
 def load_meds():
-    if os.path.exists(MED_FILE):
-        df = pd.read_csv(MED_FILE)
-        df["taken_log"] = df.get("taken_log", "").astype(str)
-        df["dose"] = pd.to_numeric(df.get("dose", 0), errors="coerce").fillna(0)
+    docs = db.collection("medications").stream()
+
+    rows = []
+    for doc in docs:
+        rows.append(doc.to_dict())
+
+    if rows:
+        df = pd.DataFrame(rows)
+
+        if "taken_log" not in df.columns:
+            df["taken_log"] = ""
+
+        if "dose" not in df.columns:
+            df["dose"] = 0
+
+        df["taken_log"] = df["taken_log"].astype(str)
+        df["dose"] = pd.to_numeric(df["dose"], errors="coerce").fillna(0)
+
         return df
-    return pd.DataFrame(columns=["user","name","dose","time","food","taken_log"])
+
+    return pd.DataFrame(columns=[
+        "user",
+        "name",
+        "dose",
+        "time",
+        "food",
+        "taken_log"
+    ])
+
 
 def save_meds(df):
-    df.to_csv(MED_FILE, index=False)
+    current_user = st.session_state.username
+
+    docs = db.collection("medications").where("user", "==", current_user).stream()
+
+    for d in docs:
+        d.reference.delete()
+
+    user_df = df[df["user"] == current_user]
+
+    for _, row in user_df.iterrows():
+        db.collection("medications").add(row.to_dict())
 
 def ask_groq_health_bot(question):
     try:
@@ -1047,94 +1131,203 @@ else:
     elif st.session_state.page == "Diet":
         st.subheader("🥗 Smart AI Diet & Nutrition")
         
-        # --- SHARED DAY CONTROLS (Synced with Med Panel) ---
+        # --- SHARED DAY CONTROLS ---
         col_day1, col_day2 = st.columns([2, 1])
+
         with col_day1:
             st.markdown(f"#### 📅 Log for Day {st.session_state.day}")
+
         with col_day2:
             if st.button("Next Day ➡️"):
                 st.session_state.day += 1
                 st.rerun()
 
-
         if "user_diet_plans" not in st.session_state:
             st.session_state.user_diet_plans = {}
+
         if "food_journal" not in st.session_state:
             st.session_state.food_journal = {}
 
-        # 1. Fetch Dynamic Profile & Meds
+        if "diet_log" not in st.session_state:
+            st.session_state.diet_log = {}
+
+        # PROFILE INFO
         u_country = st.session_state.get("country", "India")
         u_state = st.session_state.get("state", "Tamil Nadu")
         u_age = st.session_state.get("age", 21)
         u_gender = st.session_state.get("gender", "User")
         current_user = st.session_state.username
-        
+
         df = load_meds()
         user_meds = df[df["user"] == current_user]["name"].unique().tolist()
 
-        st.info(f"📍 {u_state} | 👤 {u_age}yo {u_gender} | 💊 Meds: {', '.join(user_meds) if user_meds else 'None'}")
+        st.info(
+            f"📍 {u_state} | 👤 {u_age}yo {u_gender} | 💊 Meds: {', '.join(user_meds) if user_meds else 'None'}"
+        )
 
-        # 2. AI DIET GENERATION
+        # ===================================
+        # AI DIET PLAN
+        # ===================================
         if st.button("✨ Generate AI Diet Plan"):
+
             with st.spinner("Analyzing medication safety and regional cuisine..."):
+
                 import requests
+
                 url = "https://api.groq.com/openai/v1/chat/completions"
-                headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-                
+
+                headers = {
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+
                 payload = {
-                    "model": "llama-3.3-70b-versatile", 
+                    "model": "llama-3.3-70b-versatile",
                     "messages": [
-                        {"role": "system", "content": "You are a clinical nutritionist. Priority #1 is medication safety (avoiding drug-food interactions). Priority #2 is regional Indian accuracy."},
-                        {"role": "user", "content": f"""Create a 1-day {u_state} meal plan for a {u_age}yo {u_gender}. 
-                        Current Medications: {user_meds}. 
-                        IMPORTANT: If meds include things like Statins (avoid grapefruit), Blood thinners (watch Vitamin K), or BP meds (low salt), adjust the plan.
-                        Include Breakfast, Lunch, Snack, Dinner with calories."""}
+                        {
+                            "role": "system",
+                            "content":
+                            "You are a clinical nutritionist. Priority #1 medication safety. Priority #2 regional Indian foods."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"""
+    Create a 1-day {u_state} meal plan for a {u_age}yo {u_gender}.
+    Current Medications: {user_meds}.
+    Include Breakfast, Lunch, Snack, Dinner with calories.
+    """
+                        }
                     ]
                 }
 
                 try:
-                    response = requests.post(url, headers=headers, json=payload, timeout=15)
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=15
+                    )
+
                     result = response.json()
-                    if 'choices' in result:
-                        st.session_state.user_diet_plans[current_user] = result['choices'][0]['message']['content']
+
+                    if "choices" in result:
+                        st.session_state.user_diet_plans[current_user] = \
+                            result["choices"][0]["message"]["content"]
+
                         st.rerun()
+
                 except Exception as e:
                     st.error(f"Error: {e}")
 
         if current_user in st.session_state.user_diet_plans:
-            st.markdown(f'<div class="card">{st.session_state.user_diet_plans[current_user]}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="card">{st.session_state.user_diet_plans[current_user]}</div>',
+                unsafe_allow_html=True
+            )
 
         st.markdown("---")
 
-        # 3. FOOD JOURNAL & CALORIE TRACKER
+        # ===================================
+        # FOOD JOURNAL
+        # ===================================
         st.markdown(f"### 📝 Day {st.session_state.day} Food Journal")
-        
-        # Unique key for storage: username_day
+
         log_id = f"{current_user}_{st.session_state.day}"
-        
-        # Get existing data for the current day
+
         existing_journal = st.session_state.food_journal.get(log_id, "")
-        existing_cals = st.session_state.diet_log.get(st.session_state.day, 0)
+        existing_cals = st.session_state.diet_log.get(
+            st.session_state.day, 0
+        )
 
         col_j1, col_j2 = st.columns([2, 1])
-        
+
         with col_j1:
-            user_meals = st.text_area("What did you eat today?", value=existing_journal, placeholder="e.g. 2 Idlis for breakfast, Curd rice for lunch...")
-        
+            user_meals = st.text_area(
+                "What did you eat today?",
+                value=existing_journal,
+                placeholder="e.g. Idli, Rice, Milk..."
+            )
+
         with col_j2:
-            calories = st.number_input("Total Calories (kcal)", min_value=0, value=int(existing_cals))
+            calories = st.number_input(
+                "Total Calories (kcal)",
+                min_value=0,
+                value=int(existing_cals)
+            )
 
         if st.button("💾 Save Journal & Calories"):
+
             st.session_state.food_journal[log_id] = user_meals
             st.session_state.diet_log[st.session_state.day] = calories
-            st.success(f"Day {st.session_state.day} log updated!")
 
-        # 4. FEEDBACK (Visual Indicators)
+            st.success(
+                f"✅ Day {st.session_state.day} journal saved!"
+            )
+
+            st.rerun()
+
+        # ===================================
+        # FEEDBACK
+        # ===================================
         if calories > 0:
-            if calories > 2500: st.error(f"⚠️ High intake ({calories} kcal) for Day {st.session_state.day}")
-            elif calories < 1200: st.warning(f"⚠️ Low intake ({calories} kcal) for Day {st.session_state.day}")
-            else: st.success(f"✅ Healthy intake ({calories} kcal) for Day {st.session_state.day}")
-    # ---------------- NOTES PANEL (AI UPGRADED) ----------------
+
+            if calories > 2500:
+                st.error(
+                    f"⚠️ High intake ({calories} kcal)"
+                )
+
+            elif calories < 1200:
+                st.warning(
+                    f"⚠️ Low intake ({calories} kcal)"
+                )
+
+            else:
+                st.success(
+                    f"✅ Healthy intake ({calories} kcal)"
+                )
+
+        # ===================================
+        # HISTORY DISPLAY
+        # ===================================
+        st.markdown("---")
+        st.subheader("📜 Food Journal History")
+
+        found = False
+
+        for key in sorted(
+            st.session_state.food_journal.keys(),
+            reverse=True
+        ):
+
+            if key.startswith(current_user + "_"):
+
+                try:
+                    day_num = int(key.split("_")[1])
+                except:
+                    day_num = 0
+
+                meal_text = st.session_state.food_journal[key]
+
+                cal_val = st.session_state.diet_log.get(
+                    day_num, 0
+                )
+
+                st.markdown(
+                    f"""
+    <div class="card">
+    <h4>📅 Day {day_num}</h4>
+    <p><b>🍽 Meals:</b><br>{meal_text}</p>
+    <p><b>🔥 Calories:</b> {cal_val} kcal</p>
+    </div>
+    """,
+                    unsafe_allow_html=True
+                )
+
+                found = True
+
+        if not found:
+            st.info("No food history available yet.")
+# ---------------- NOTES PANEL (AI UPGRADED) ----------------
     elif st.session_state.page == "Notes":
         st.subheader("🧠 Smart Health Notes")
         NOTES_FILE = "notes.csv"
