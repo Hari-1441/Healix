@@ -11,10 +11,7 @@ from firebase_admin import credentials, firestore
 
 # ---------------- FIREBASE INIT ----------------
 if not firebase_admin._apps:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    key_path = os.path.join(BASE_DIR, "firebase-key.json")
-
-    cred = credentials.Certificate(key_path)
+    cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
