@@ -55,21 +55,18 @@ def save_profile(username, phone, country, state, age, gender, p_id):
     
 def load_notes():
     docs = db.collection("notes").stream()
-
     rows = []
     for doc in docs:
         rows.append(doc.to_dict())
 
     if rows:
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        # Force "day" to string immediately to prevent search crashes
+        if "day" in df.columns:
+            df["day"] = df["day"].astype(str)
+        return df
 
-    return pd.DataFrame(columns=[
-        "user",
-        "day",
-        "note",
-        "tag",
-        "time"
-    ])
+    return pd.DataFrame(columns=["user", "day", "note", "tag", "time"])
 
 def save_notes(df):
     current_user = st.session_state.username
@@ -215,6 +212,32 @@ If emergency symptoms say seek doctor immediately.
 
     except:
         return "Connection issue while contacting AI."
+    
+def date_navigator(key_suffix):
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    # 1. Update date via buttons
+    if col1.button("⬅️ Previous", key=f"prev_{key_suffix}"):
+        st.session_state.current_date -= __import__("datetime").timedelta(days=1)
+        st.rerun()
+        
+    if col3.button("Next ➡️", key=f"next_{key_suffix}"):
+        st.session_state.current_date += __import__("datetime").timedelta(days=1)
+        st.rerun()
+
+    # 2. Date picker stays in sync with session_state
+    with col2:
+        new_date = st.date_input(
+            "Selected Date", 
+            value=st.session_state.current_date, 
+            key=f"date_picker_widget_{key_suffix}"
+        )
+        # Update session state only if the user manually picks a new date from the calendar
+        if new_date != st.session_state.current_date:
+            st.session_state.current_date = new_date
+            st.rerun()
+            
+    return st.session_state.current_date.strftime("%Y-%m-%d")
 
 # ---------------- SESSION ----------------
 if "role" not in st.session_state:
@@ -224,7 +247,9 @@ if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
     st.session_state.page = "login"
-    st.session_state.day = 1
+    # Replace st.session_state.day = 1 with:
+    if "current_date" not in st.session_state:
+        st.session_state.current_date = datetime.now().date()
     st.session_state.profile_complete = False
 
 if "diet_log" not in st.session_state:
@@ -486,10 +511,12 @@ elif st.session_state.role == "doctor":
                     st.markdown("#### 🥗 Diet & Nutrition Logs")
                     # Retrieve the global diet and journal from session state
                     # (In a real app, these would be in a CSV, but for now we pull from the linked session)
-                    log_id = f"{p_user}_{st.session_state.day}"
+                    # The doctor can also see the patient's data based on the currently selected date
+                    current_date_str = st.session_state.current_date.strftime("%Y-%m-%d")
+                    log_id = f"{p_user}_{current_date_str}"
                     p_diet = st.session_state.user_diet_plans.get(p_user, "No plan assigned.")
                     p_journal = st.session_state.food_journal.get(log_id, "No intake logged today.")
-                    p_cals = st.session_state.diet_log.get(st.session_state.day, 0)
+                    p_cals = st.session_state.diet_log.get(current_date_str, 0)
 
                     col_h1, col_h2 = st.columns(2)
                     col_h1.metric("Today's Intake", f"{p_cals} kcal")
@@ -504,7 +531,7 @@ elif st.session_state.role == "doctor":
                         notes_df = load_notes() 
                         p_notes = notes_df[notes_df["user"] == p_user]
                         if not p_notes.empty:
-                            st.table(p_notes[["day", "tag", "note", "time"]])
+                            st.table(p_notes[["day", "tag", "note", "time"]].rename(columns={"day": "Date"}))
                         else:
                             st.info("No patient notes found.")
                     except Exception as e:
@@ -870,13 +897,15 @@ else:
         # ---------------- CALCULATIONS ----------------
         total_meds = len(user_df)
         total_dose = user_df["dose"].sum()
+        current_date_str = st.session_state.current_date.strftime("%Y-%m-%d")
         today_taken = 0
         total_today = 0
-        
+
         for _, row in user_df.iterrows():
             total_today += row["dose"]
             taken_days = str(row["taken_log"]).split(",")
-            if str(st.session_state.day) in taken_days:
+            # Check for the date string instead of day number
+            if current_date_str in taken_days:
                 today_taken += row["dose"]
                 
         # NOTES INSIGHT
@@ -900,8 +929,8 @@ else:
                     insight_msg = "✅ Improving"
                     insight_color = "#22c55e"
                     
-        # CALORIES
-        calories = st.session_state.diet_log.get(st.session_state.day, 0)
+        # Get calories using the date string
+        calories = st.session_state.diet_log.get(current_date_str, 0)
         
         # ---------------- UI GRID ----------------
         st.markdown("## 📊 Dashboard Overview")
@@ -968,7 +997,7 @@ else:
         
         for _, row in user_df.iterrows():
             taken_days = str(row["taken_log"]).split(",")
-            if str(st.session_state.day) in taken_days:
+            if current_date_str in taken_days:
                 taken_meds_today += 1
                 
         progress = 0
@@ -986,10 +1015,10 @@ else:
                 taken_days = [d for d in str(row["taken_log"]).split(",") if d.strip() != ""]
                 for d in taken_days:
                     try:
-                        day_val = int(float(d))
-                        if day_val not in adherence_map:
-                            adherence_map[day_val] = {"taken": 0, "total": total_meds_today}
-                        adherence_map[day_val]["taken"] += 1
+                        if d.strip() != "":
+                            if d not in adherence_map:
+                                adherence_map[d] = {"taken": 0, "total": total_meds_today}
+                            adherence_map[d]["taken"] += 1
                     except:
                         pass
         
@@ -1010,405 +1039,361 @@ else:
         else:
             st.info("No adherence data yet")
             
- # ---------------- MEDICATIONS PAGE (WITH 1000mg LIMIT) ----------------
-    if st.session_state.page == "Medications":
-        st.subheader("💊 Medication Manager")
-        df = load_meds()
-        user_df = df[df["user"] == st.session_state.username]
-        
-        # Calculate current total dosage for the user
-        current_daily_total = user_df["dose"].sum()
+# ---------------- MEDICATIONS PAGE (WITH 1000mg LIMIT) ----------------
+if st.session_state.page == "Medications":
+    st.subheader("💊 Medication Manager")
+    df = load_meds()
+    user_df = df[df["user"] == st.session_state.username]
+    
+    # Calculate current total dosage for the user
+    current_daily_total = user_df["dose"].sum()
 
-        with st.expander("➕ Add New Medicine"):
-            st.markdown(f"**Current Daily Total:** `{current_daily_total}mg / 1000mg`")
-            
-            name = st.text_input("Medicine Name")
-            dose = st.number_input("Dose (mg)", min_value=0, step=10)
-            time = st.selectbox("Time", ["Morning","Afternoon","Night"])
-            food = st.selectbox("Food", ["Before Food","After Food"])
-            
-            if st.button("Add Medicine"):
-                if name.strip() == "":
-                    st.error("Please enter a medicine name.")
-                # SAFETY CHECK: 1000mg Limit
-                elif current_daily_total + dose > 1000:
-                    st.error(f"⚠️ Limit Reached! Adding this would bring your total to {current_daily_total + dose}mg. Daily maximum is 1000mg.")
-                else:
-                    new = pd.DataFrame([[st.session_state.username, name, dose, time, food, ""]], 
-                                     columns=["user","name","dose","time","food","taken_log"])
-                    df = pd.concat([df, new], ignore_index=True)
-                    save_meds(df)
-                    st.success(f"Added {name} successfully!")
-                    st.rerun()
+    with st.expander("➕ Add New Medicine"):
+        st.markdown(f"**Current Daily Total:** `{current_daily_total}mg / 1000mg`")
         
-        st.markdown("---")
+        name = st.text_input("Medicine Name")
+        dose = st.number_input("Dose (mg)", min_value=0, step=10)
+        time = st.selectbox("Time", ["Morning","Afternoon","Night"])
+        food = st.selectbox("Food", ["Before Food","After Food"])
         
-        # Day Navigation
-        colA, colB = st.columns(2)
-        with colA:
-            if st.button("⬅ Previous Day", key="med_prev"):
-                if st.session_state.day > 1:
-                    st.session_state.day -= 1
-                    st.rerun()
-        with colB:
-            if st.button("Next Day ➡", key="med_next"):
-                st.session_state.day += 1
-                st.rerun()
-            
-        st.subheader(f"📅 Day {st.session_state.day} Log")
-        
-        # Filter again to ensure we have fresh data after additions
-        user_df = df[df["user"] == st.session_state.username]
-
-        if user_df.empty:
-            st.info("No medicines added yet. Use the expander above to start.")
-        else:
-            st.markdown("### 🟢 Today's Schedule")
-            for i, row in user_df.iterrows():
-                taken_days = str(row["taken_log"]).split(",")
-                is_taken_today = str(st.session_state.day) in taken_days
-                
-                col1, col2 = st.columns([6,1])
-                status = "✅ Taken" if is_taken_today else "⏳ Pending"
-                
-                col1.markdown(f"""
-                <div class="card">
-                    💊 <b>{row['name']}</b> — {row['dose']}mg<br>
-                    🕒 {row['time']} | 🍽 {row['food']}<br>
-                    📌 Status: {status}
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if not is_taken_today:
-                    if col2.button("✔️", key=f"take_{i}"):
-                        new_log = str(row["taken_log"])
-                        if new_log in ["", "nan", "None"]:
-                            new_log = str(st.session_state.day)
-                        else:
-                            new_log = f"{new_log},{st.session_state.day}"
-                        
-                        df.at[i, "taken_log"] = new_log
-                        save_meds(df)
-                        st.rerun()
-
-            st.markdown("---")
-            st.markdown("### 📋 Management (All Prescriptions)")
-            for i, row in user_df.iterrows():
-                col1, col2 = st.columns([6,1])
-                col1.markdown(f"""
-                <div class="card" style="border-left: 5px solid #38bdf8;">
-                    <b>{row['name']}</b> ({row['dose']}mg)<br>
-                    <small>Logged on days: {row['taken_log'] if row['taken_log'] else 'None'}</small>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if col2.button("❌", key=f"del_{i}"):
-                    df = df.drop(i)
-                    save_meds(df)
-                    st.rerun()
-
-            st.markdown("### 📊 Adherence & Dosage Trend")
-            graph_data = []
-            for _, row in user_df.iterrows():
-                if row["taken_log"]:
-                    for d in str(row["taken_log"]).split(","):
-                        try:
-                            day_val = int(float(d))
-                            graph_data.append({"day": day_val, "dose": row["dose"]})
-                        except:
-                            pass
-            
-            if graph_data:
-                graph_df = pd.DataFrame(graph_data)
-                chart_pivot = graph_df.groupby("day")["dose"].sum()
-                st.line_chart(chart_pivot)
+        if st.button("Add Medicine"):
+            if name.strip() == "":
+                st.error("Please enter a medicine name.")
+            # SAFETY CHECK: 1000mg Limit
+            elif current_daily_total + dose > 1000:
+                st.error(f"⚠️ Limit Reached! Adding this would bring your total to {current_daily_total + dose}mg. Daily maximum is 1000mg.")
             else:
-                st.caption("Complete your daily intake to see trends.")        
-# ---------------- DIET PANEL (STABLE GROQ VERSION) ----------------
-    elif st.session_state.page == "Diet":
-        st.subheader("🥗 Smart AI Diet & Nutrition")
-        
-        # --- SHARED DAY CONTROLS ---
-        col_day1, col_day2 = st.columns([2, 1])
-
-        with col_day1:
-            st.markdown(f"#### 📅 Log for Day {st.session_state.day}")
-
-        with col_day2:
-            if st.button("Next Day ➡️"):
-                st.session_state.day += 1
+                new = pd.DataFrame([[st.session_state.username, name, dose, time, food, ""]], 
+                                 columns=["user","name","dose","time","food","taken_log"])
+                df = pd.concat([df, new], ignore_index=True)
+                save_meds(df)
+                st.success(f"Added {name} successfully!")
                 st.rerun()
+    
+    st.markdown("---")
+    
+    # --- DATE NAVIGATOR REPLACEMENT ---
+    current_date_str = date_navigator("meds")
+    st.subheader(f"📅 Log for {current_date_str}")
+    
+    # Filter again to ensure we have fresh data after additions
+    user_df = df[df["user"] == st.session_state.username]
 
-        if "user_diet_plans" not in st.session_state:
-            st.session_state.user_diet_plans = {}
-
-        if "food_journal" not in st.session_state:
-            st.session_state.food_journal = {}
-
-        if "diet_log" not in st.session_state:
-            st.session_state.diet_log = {}
-
-        # PROFILE INFO
-        u_country = st.session_state.get("country", "India")
-        u_state = st.session_state.get("state", "Tamil Nadu")
-        u_age = st.session_state.get("age", 21)
-        u_gender = st.session_state.get("gender", "User")
-        current_user = st.session_state.username
-
-        df = load_meds()
-        user_meds = df[df["user"] == current_user]["name"].unique().tolist()
-
-        st.info(
-            f"📍 {u_state} | 👤 {u_age}yo {u_gender} | 💊 Meds: {', '.join(user_meds) if user_meds else 'None'}"
-        )
-
-        # ===================================
-        # AI DIET PLAN
-        # ===================================
-        if st.button("✨ Generate AI Diet Plan"):
-
-            with st.spinner("Analyzing medication safety and regional cuisine..."):
-
-                import requests
-
-                url = "https://api.groq.com/openai/v1/chat/completions"
-
-                headers = {
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                    "Content-Type": "application/json"
-                }
-
-                payload = {
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content":
-                            "You are a clinical nutritionist. Priority #1 medication safety. Priority #2 regional Indian foods."
-                        },
-                        {
-                            "role": "user",
-                            "content": f"""
-    Create a 1-day {u_state} meal plan for a {u_age}yo {u_gender}.
-    Current Medications: {user_meds}.
-    Include Breakfast, Lunch, Snack, Dinner with calories.
-    """
-                        }
-                    ]
-                }
-
-                try:
-                    response = requests.post(
-                        url,
-                        headers=headers,
-                        json=payload,
-                        timeout=15
-                    )
-
-                    result = response.json()
-
-                    if "choices" in result:
-                        st.session_state.user_diet_plans[current_user] = \
-                            result["choices"][0]["message"]["content"]
-
-                        st.rerun()
-
-                except Exception as e:
-                    st.error(f"Error: {e}")
-
-        if current_user in st.session_state.user_diet_plans:
-            st.markdown(
-                f'<div class="card">{st.session_state.user_diet_plans[current_user]}</div>',
-                unsafe_allow_html=True
-            )
-
-        st.markdown("---")
-
-        # ===================================
-        # FOOD JOURNAL
-        # ===================================
-        st.markdown(f"### 📝 Day {st.session_state.day} Food Journal")
-
-        log_id = f"{current_user}_{st.session_state.day}"
-
-        existing_journal = st.session_state.food_journal.get(log_id, "")
-        existing_cals = st.session_state.diet_log.get(
-            st.session_state.day, 0
-        )
-
-        col_j1, col_j2 = st.columns([2, 1])
-
-        with col_j1:
-            user_meals = st.text_area(
-                "What did you eat today?",
-                value=existing_journal,
-                placeholder="e.g. Idli, Rice, Milk..."
-            )
-
-        with col_j2:
-            calories = st.number_input(
-                "Total Calories (kcal)",
-                min_value=0,
-                value=int(existing_cals)
-            )
-
-        if st.button("💾 Save Journal & Calories"):
-
-            st.session_state.food_journal[log_id] = user_meals
-            st.session_state.diet_log[st.session_state.day] = calories
-
-            st.success(
-                f"✅ Day {st.session_state.day} journal saved!"
-            )
-
-            st.rerun()
-
-        # ===================================
-        # FEEDBACK
-        # ===================================
-        if calories > 0:
-
-            if calories > 2500:
-                st.error(
-                    f"⚠️ High intake ({calories} kcal)"
-                )
-
-            elif calories < 1200:
-                st.warning(
-                    f"⚠️ Low intake ({calories} kcal)"
-                )
-
-            else:
-                st.success(
-                    f"✅ Healthy intake ({calories} kcal)"
-                )
-
-        # ===================================
-        # HISTORY DISPLAY
-        # ===================================
-        st.markdown("---")
-        st.subheader("📜 Food Journal History")
-
-        found = False
-
-        for key in sorted(
-            st.session_state.food_journal.keys(),
-            reverse=True
-        ):
-
-            if key.startswith(current_user + "_"):
-
-                try:
-                    day_num = int(key.split("_")[1])
-                except:
-                    day_num = 0
-
-                meal_text = st.session_state.food_journal[key]
-
-                cal_val = st.session_state.diet_log.get(
-                    day_num, 0
-                )
-
-                st.markdown(
-                    f"""
-    <div class="card">
-    <h4>📅 Day {day_num}</h4>
-    <p><b>🍽 Meals:</b><br>{meal_text}</p>
-    <p><b>🔥 Calories:</b> {cal_val} kcal</p>
-    </div>
-    """,
-                    unsafe_allow_html=True
-                )
-
-                found = True
-
-        if not found:
-            st.info("No food history available yet.")
-# ---------------- NOTES PANEL (AI UPGRADED) ----------------
-    elif st.session_state.page == "Notes":
-        st.subheader("🧠 Smart Health Notes")
-        NOTES_FILE = "notes.csv"
-        
-        # ---------------- LOAD / SAVE ----------------
-        def load_notes():
-            if os.path.exists(NOTES_FILE):
-                return pd.read_csv(NOTES_FILE)
-            return pd.DataFrame(columns=["user","day","note","tag","time"])
+    if user_df.empty:
+        st.info("No medicines added yet. Use the expander above to start.")
+    else:
+        st.markdown("### 🟢 Today's Schedule")
+        for i, row in user_df.iterrows():
+            taken_days = str(row["taken_log"]).split(",")
+            is_taken_today = current_date_str in taken_days
             
-        def save_notes(df):
-            df.to_csv(NOTES_FILE, index=False)
+            col1, col2 = st.columns([6,1])
+            status = "✅ Taken" if is_taken_today else "⏳ Pending"
             
-        notes_df = load_notes()
-        user_notes = notes_df[notes_df["user"] == st.session_state.username]
-        
-        # ---------------- ADD NOTE ----------------
-        st.markdown("### ✍️ Add Note")
-        note_text = st.text_area("Write your note")
-        tag = st.selectbox("Tag", ["Symptom","Side Effect","Mood","Diet","Other"])
-        if st.button("Save Note"):
-            if note_text.strip() != "":
-                from datetime import datetime
-                new_note = pd.DataFrame([[
-                    st.session_state.username,
-                    st.session_state.day,
-                    note_text,
-                    tag,
-                    datetime.now().strftime("%Y-%m-%d %H:%M")
-                ]], columns=["user","day","note","tag","time"])
-                notes_df = pd.concat([notes_df, new_note], ignore_index=True)
-                save_notes(notes_df)
-                st.success("✅ Note saved")
-                st.rerun()
-                
-        # ---------------- SEARCH ----------------
-        st.markdown("### 🔍 Search Notes")
-        search = st.text_input("Search by keyword")
-        if search:
-            user_notes = user_notes[user_notes["note"].str.contains(search, case=False)]
-            
-        # ---------------- AI ANALYSIS ----------------
-        st.markdown("### 🤖 Health Insights")
-        all_text = " ".join(user_notes["note"].astype(str)).lower()
-        
-        warning_words = ["pain","fever","headache","vomit","weak","dizzy"]
-        good_words = ["good","better","improved","fine","ok"]
-        
-        warning_count = sum(word in all_text for word in warning_words)
-        good_count = sum(word in all_text for word in good_words)
-        
-        if warning_count > good_count:
-            st.error("⚠️ Frequent symptoms detected. Consider consulting a doctor.")
-        elif good_count > warning_count:
-            st.success("✅ Health seems to be improving based on your notes.")
-        else:
-            st.info("ℹ️ Not enough data for insights yet.")
-            
-        # ---------------- DISPLAY NOTES ----------------
-        st.markdown("### 📋 Your Notes")
-        for i, row in user_notes.iterrows():
-            st.markdown(f"""
+            col1.markdown(f"""
             <div class="card">
-                📅 Day {row['day']} <br>
-                🏷 {row['tag']} <br>
-                🕒 {row['time']} <br><br>
-                📝 {row['note']}
+                💊 <b>{row['name']}</b> — {row['dose']}mg<br>
+                🕒 {row['time']} | 🍽 {row['food']}<br>
+                📌 Status: {status}
             </div>
             """, unsafe_allow_html=True)
-            if st.button("❌ Delete", key=f"note_del_{i}"):
-                notes_df = notes_df.drop(i)
-                save_notes(notes_df)
+            
+            if not is_taken_today:
+                if col2.button("✔️", key=f"take_{i}"):
+                    new_log = str(row["taken_log"])
+                    if new_log in ["", "nan", "None"]:
+                        new_log = current_date_str
+                    else:
+                        new_log = f"{new_log},{current_date_str}"
+                    
+                    df.at[i, "taken_log"] = new_log
+                    save_meds(df)
+                    st.rerun()
+
+        st.markdown("---")
+        st.markdown("### 📋 Management (All Prescriptions)")
+        for i, row in user_df.iterrows():
+            col1, col2 = st.columns([6,1])
+            col1.markdown(f"""
+            <div class="card" style="border-left: 5px solid #38bdf8;">
+                <b>{row['name']}</b> ({row['dose']}mg)<br>
+                <small>Logged on dates: {row['taken_log'] if row['taken_log'] else 'None'}</small>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if col2.button("❌", key=f"del_{i}"):
+                df = df.drop(i)
+                save_meds(df)
                 st.rerun()
+
+        st.markdown("### 📊 Adherence & Dosage Trend")
+        graph_data = []
+        for _, row in user_df.iterrows():
+            if row["taken_log"]:
+                for d in str(row["taken_log"]).split(","):
+                    graph_data.append({"day": d, "dose": row["dose"]})
+        
+        if graph_data:
+            graph_df = pd.DataFrame(graph_data)
+            chart_pivot = graph_df.groupby("day")["dose"].sum()
+            st.line_chart(chart_pivot)
+        else:
+            st.caption("Complete your daily intake to see trends.")         
+
+# ---------------- DIET PANEL (STABLE GROQ VERSION) ----------------
+elif st.session_state.page == "Diet":
+    st.subheader("🥗 Smart AI Diet & Nutrition")
+    
+    # --- DATE NAVIGATOR REPLACEMENT ---
+    current_date_str = date_navigator("diet")
+    st.markdown(f"#### 📅 Log for {current_date_str}")
+
+    if "user_diet_plans" not in st.session_state:
+        st.session_state.user_diet_plans = {}
+
+    if "food_journal" not in st.session_state:
+        st.session_state.food_journal = {}
+
+    if "diet_log" not in st.session_state:
+        st.session_state.diet_log = {}
+
+    # PROFILE INFO
+    u_country = st.session_state.get("country", "India")
+    u_state = st.session_state.get("state", "Tamil Nadu")
+    u_age = st.session_state.get("age", 21)
+    u_gender = st.session_state.get("gender", "User")
+    current_user = st.session_state.username
+
+    df = load_meds()
+    user_meds = df[df["user"] == current_user]["name"].unique().tolist()
+
+    st.info(
+        f"📍 {u_state} | 👤 {u_age}yo {u_gender} | 💊 Meds: {', '.join(user_meds) if user_meds else 'None'}"
+    )
+
+    # ===================================
+    # AI DIET PLAN
+    # ===================================
+    if st.button("✨ Generate AI Diet Plan"):
+        with st.spinner("Analyzing medication safety and regional cuisine..."):
+            import requests
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a clinical nutritionist. Priority #1 medication safety. Priority #2 regional Indian foods."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Create a 1-day {u_state} meal plan for a {u_age}yo {u_gender}. Current Medications: {user_meds}. Include Breakfast, Lunch, Snack, Dinner with calories."
+                    }
+                ]
+            }
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=15)
+                result = response.json()
+                if "choices" in result:
+                    st.session_state.user_diet_plans[current_user] = result["choices"][0]["message"]["content"]
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    if current_user in st.session_state.user_diet_plans:
+        st.markdown(
+            f'<div class="card">{st.session_state.user_diet_plans[current_user]}</div>',
+            unsafe_allow_html=True
+        )
+
+    st.markdown("---")
+
+    # ===================================
+    # FOOD JOURNAL
+    # ===================================
+    st.markdown(f"### 📝 {current_date_str} Food Journal")
+
+    log_id = f"{current_user}_{current_date_str}"
+
+    existing_journal = st.session_state.food_journal.get(log_id, "")
+    existing_cals = st.session_state.diet_log.get(current_date_str, 0)
+
+    col_j1, col_j2 = st.columns([2, 1])
+
+    with col_j1:
+        user_meals = st.text_area(
+            "What did you eat today?",
+            value=existing_journal,
+            placeholder="e.g. Idli, Rice, Milk..."
+        )
+
+    with col_j2:
+        calories = st.number_input(
+            "Total Calories (kcal)",
+            min_value=0,
+            value=int(existing_cals)
+        )
+
+    if st.button("💾 Save Journal & Calories"):
+        st.session_state.food_journal[log_id] = user_meals
+        st.session_state.diet_log[current_date_str] = calories
+        st.success(f"✅ Log for {current_date_str} saved!")
+        st.rerun()
+
+    # ===================================
+    # FEEDBACK
+    # ===================================
+    if calories > 0:
+        if calories > 2500:
+            st.error(f"⚠️ High intake ({calories} kcal)")
+        elif calories < 1200:
+            st.warning(f"⚠️ Low intake ({calories} kcal)")
+        else:
+            st.success(f"✅ Healthy intake ({calories} kcal)")
+
+    # ===================================
+    # HISTORY DISPLAY
+    # ===================================
+    st.markdown("---")
+    st.subheader("📜 Food Journal History")
+
+    found = False
+    for key in sorted(st.session_state.food_journal.keys(), reverse=True):
+            if key.startswith(current_user + "_"):
+                date_part = key.replace(current_user + "_", "")
+                meal_text = st.session_state.food_journal[key]
+                cal_val = st.session_state.diet_log.get(date_part, 0)
+
+                col_h1, col_h2 = st.columns([6, 1])
+                col_h1.markdown(f"""
+                    <div class="card">
+                        <h4>📅 Date: {date_part}</h4>
+                        <p><b>🍽 Meals:</b> {meal_text}</p>
+                        <p><b>🔥 Calories:</b> {cal_val} kcal</p>
+                    </div>
+                """, unsafe_allow_html=True)
                 
-        # ---------------- DOWNLOAD ----------------
-        st.markdown("### 📥 Export Notes")
-        if not user_notes.empty:
-            st.download_button(
-                "Download Notes",
-                user_notes.to_csv(index=False),
-                "my_health_notes.csv"
-            )
+                if col_h2.button("🗑️", key=f"del_diet_{key}"):
+                    del st.session_state.food_journal[key]
+                    if date_part in st.session_state.diet_log:
+                        del st.session_state.diet_log[date_part]
+                    st.rerun()
+                found = True
+
+    if not found:
+        st.info("No food history available yet.")
+
+# ---------------- NOTES PANEL (AI UPGRADED) ----------------
+elif st.session_state.page == "Notes":
+    st.subheader("🧠 Smart Health Notes")
+    
+    # --- DATE NAVIGATOR ADDITION ---
+    current_date_str = date_navigator("notes")
+    
+    NOTES_FILE = "notes.csv"
+    
+    def load_notes():
+        if os.path.exists(NOTES_FILE):
+            return pd.read_csv(NOTES_FILE)
+        return pd.DataFrame(columns=["user","day","note","tag","time"])
+        
+    def save_notes(df):
+        df.to_csv(NOTES_FILE, index=False)
+        
+    notes_df = load_notes()
+    user_notes = notes_df[notes_df["user"] == st.session_state.username]
+    
+    # ---------------- ADD NOTE ----------------
+    st.markdown(f"### ✍️ Add Note for {current_date_str}")
+    note_text = st.text_area("Write your note")
+    tag = st.selectbox("Tag", ["Symptom","Side Effect","Mood","Diet","Other"])
+    if st.button("Save Note"):
+        if note_text.strip() != "":
+            from datetime import datetime
+            new_note = pd.DataFrame([[
+                st.session_state.username,
+                current_date_str,
+                note_text,
+                tag,
+                datetime.now().strftime("%Y-%m-%d %H:%M")
+            ]], columns=["user","day","note","tag","time"])
+            notes_df = pd.concat([notes_df, new_note], ignore_index=True)
+            save_notes(notes_df)
+            st.success(f"✅ Note saved for {current_date_str}")
+            st.rerun()
+            
+# ---------------- SEARCH ----------------
+    st.markdown("### 🔍 Search Notes")
+    s_col1, s_col2 = st.columns(2)
+    
+    # We use session state to keep track of the search values
+    search_txt = s_col1.text_input("Search by keyword", placeholder="e.g. Fever", key="note_keyword")
+    
+    # We use a toggle or clearable date for the search
+    search_date_val = s_col2.date_input("Filter by Date", value=None, key="note_calendar_search")
+    
+    # Start with all notes for this user
+    filtered_notes = user_notes.copy()
+
+    # Apply keyword filter if text exists
+    if search_txt:
+        filtered_notes = filtered_notes[filtered_notes["note"].astype(str).str.contains(search_txt, case=False)]
+    
+    # Apply date filter only if a date was actually picked
+    if search_date_val is not None:
+        search_date_str = search_date_val.strftime("%Y-%m-%d")
+        filtered_notes = filtered_notes[filtered_notes["day"].astype(str) == search_date_str]
+    
+    # Update the variable used for the display loop below
+    user_notes = filtered_notes
+        
+    # ---------------- AI ANALYSIS ----------------
+    st.markdown("### 🤖 Health Insights")
+    all_text = " ".join(user_notes["note"].astype(str)).lower()
+    
+    warning_words = ["pain","fever","headache","vomit","weak","dizzy"]
+    good_words = ["good","better","improved","fine","ok"]
+    
+    warning_count = sum(word in all_text for word in warning_words)
+    good_count = sum(word in all_text for word in good_words)
+    
+    if warning_count > good_count:
+        st.error("⚠️ Frequent symptoms detected. Consider consulting a doctor.")
+    elif good_count > warning_count:
+        st.success("✅ Health seems to be improving based on your notes.")
+    else:
+        st.info("ℹ️ Not enough data for insights yet.")
+        
+    # ---------------- DISPLAY NOTES ----------------
+    st.markdown("### 📋 Your Notes")
+    for i, row in user_notes.iterrows():
+        st.markdown(f"""
+        <div class="card">
+            📅 Date: {row['day']} <br>
+            🏷 {row['tag']} <br>
+            🕒 {row['time']} <br><br>
+            📝 {row['note']}
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("❌ Delete", key=f"note_del_{i}"):
+            notes_df = notes_df.drop(i)
+            save_notes(notes_df)
+            st.rerun()
+            
+    # ---------------- DOWNLOAD ----------------
+    st.markdown("### 📥 Export Notes")
+    if not user_notes.empty:
+        st.download_button(
+            "Download Notes",
+            user_notes.to_csv(index=False),
+            "my_health_notes.csv"
+        )
     # ---------------- PAGE: MEDICAL RECORDS ----------------
-    elif st.session_state.page == "Records":
+elif st.session_state.page == "Records":
         st.subheader("📂 Medical Records Vault")
 
         RECORD_DIR = "medical_records"
