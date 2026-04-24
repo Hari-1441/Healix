@@ -1138,75 +1138,75 @@ if st.session_state.page == "Medications":
     
     st.markdown("---")
     
-    # 3. Date Navigation and Display
-    current_date_str = date_navigator("meds")
-    st.subheader(f"📅 Log for {current_date_str}")
+# ---------------- 3. DATE NAVIGATION & SYNC ----------------
+    # Call the navigator only ONCE to get the synced date string
+    current_date_str = date_navigator("meds") 
     
-    # 4. Smart Filtering Logic (The "Gap" Logic)
-# 3. Due Today Logic
-    st.markdown("### 🟢 Due Today")
-    found_due = False
-    
-    # ... after loading meds ...
-    
-    # 3. Date Navigation
-    current_date_str = date_navigator("meds") # This now returns the CORRECT synced string
-    
-    # Define this clearly for the tick logic below
-    active_date_obj = st.session_state.current_date
+    # Capture the date object immediately after navigation to ensure logic matches UI
+    active_date_obj = st.session_state.current_date 
     
     st.subheader(f"📅 Log for {current_date_str}")
-    
-    # 4. Due Today Logic
+
+    # ---------------- 4. SMART DUE LOGIC (THE GAP MATH) ----------------
     st.markdown("### 🟢 Due Today")
     found_due = False
     
     if not user_df.empty:
         for i, row in user_df.iterrows():
             try:
-                # Calculate if due based on the OBJECT from session state
+                # Calculate if medicine is due based on the Assigned Date and the Navigator Date
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
                 delta_days = (active_date_obj - start_dt).days
                 
                 is_due = False
+                
+                # Only show if the selected date is the start date or in the future
                 if delta_days >= 0:
                     val = int(row['freq_val'])
                     unit = row['freq_unit']
-                    if unit == "Hours" or (unit == "Days" and delta_days % val == 0): is_due = True
-                    elif unit == "Weeks" and delta_days % (val * 7) == 0: is_due = True
-                    elif unit == "Months" and delta_days % (val * 30) == 0: is_due = True
+                    
+                    if unit == "Hours":
+                        is_due = True # Hours are treated as daily requirements
+                    elif unit == "Days":
+                        if delta_days % val == 0: is_due = True
+                    elif unit == "Weeks":
+                        if delta_days % (val * 7) == 0: is_due = True
+                    elif unit == "Months":
+                        if delta_days % (val * 30) == 0: is_due = True
 
                 if is_due:
                     found_due = True
-                    # Clean existing logs
+                    # Clean and parse existing intake logs
                     logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
                     
-                    # Check against the active date string
-                    is_taken_today = current_date_str in logs
+                    # Sync Check: Is the medicine taken on the specific date shown in the UI?
+                    is_taken_on_this_day = current_date_str in logs
                     
                     col1, col2 = st.columns([6,1])
-                    status = "✅ Taken" if is_taken_today else "⏳ Pending"
+                    status = "✅ Taken" if is_taken_on_this_day else "⏳ Pending"
+                    card_color = "#22c55e" if is_taken_on_this_day else "#eab308"
                     
                     col1.markdown(f"""
-                    <div class="card" style="border-left: 5px solid {'#22c55e' if is_taken_today else '#eab308'};">
+                    <div class="card" style="border-left: 5px solid {card_color};">
                         💊 <b>{row['name']}</b> — {row['dose']}mg<br>
-                        🔄 Every {val} {unit} | 📌 Status: {status}
+                        🔄 Schedule: Every {val} {unit} | 📌 Status: {status}
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    if not is_taken_today:
-                        # KEY FIX: The key must include the date string so the button resets every time you move days
+                    if not is_taken_on_this_day:
+                        # KEY: The key includes current_date_str to force button refresh on date change
                         if col2.button("✔️", key=f"btn_{i}_{current_date_str}"):
                             logs.append(current_date_str)
-                            # Remove duplicates and join
-                            new_log_str = ",".join(list(set(logs)))
                             
-                            # Save directly to main df
+                            # Join logs and save back to original dataframe 'df' at index 'i'
+                            new_log_str = ",".join(list(set(logs)))
                             df.at[i, "taken_log"] = new_log_str
+                            
                             save_meds(df, st.session_state.username) 
                             st.rerun()
             except:
                 continue
+
     if not found_due:
         st.info("No medications scheduled for this date.")
 
