@@ -202,30 +202,17 @@ If emergency symptoms say seek doctor immediately.
         return "Connection issue while contacting AI."
     
 def date_navigator(key_suffix):
-    col1, col2, col3 = st.columns([1, 2, 1])
+    # Only show the date picker, centered using a single column layout
+    new_date = st.date_input(
+        "📅 Select Date to View/Log", 
+        value=st.session_state.current_date, 
+        key=f"date_picker_widget_{key_suffix}"
+    )
     
-    # 1. Handle Buttons
-    if col1.button("⬅️ Previous", key=f"prev_{key_suffix}"):
-        st.session_state.current_date -= __import__("datetime").timedelta(days=1)
+    # Update session state if the user picks a new date
+    if new_date != st.session_state.current_date:
+        st.session_state.current_date = new_date
         st.rerun()
-        
-    if col3.button("Next ➡️", key=f"next_{key_suffix}"):
-        st.session_state.current_date += __import__("datetime").timedelta(days=1)
-        st.rerun()
-
-    # 2. Handle Date Picker (Force it to follow session_state)
-    with col2:
-        # We use st.session_state.current_date as the 'value'
-        picked_date = st.date_input(
-            "Selected Date", 
-            value=st.session_state.current_date, 
-            key=f"date_input_{key_suffix}"
-        )
-        
-        # If the user manually clicks the calendar to change dates, update session state
-        if picked_date != st.session_state.current_date:
-            st.session_state.current_date = picked_date
-            st.rerun()
             
     return st.session_state.current_date.strftime("%Y-%m-%d")
 
@@ -1138,35 +1125,27 @@ if st.session_state.page == "Medications":
     
     st.markdown("---")
     
-# ---------------- 3. DATE NAVIGATION & SYNC ----------------
-    # Call the navigator only ONCE to get the synced date string
+# ---------------- 3. DATE SELECTION ----------------
+    # Just show the calendar
     current_date_str = date_navigator("meds") 
-    
-    # Capture the date object immediately after navigation to ensure logic matches UI
     active_date_obj = st.session_state.current_date 
-    
-    st.subheader(f"📅 Log for {current_date_str}")
 
-    # ---------------- 4. SMART DUE LOGIC (THE GAP MATH) ----------------
-    st.markdown("### 🟢 Due Today")
+    # ---------------- 4. MEDICINES DUE ON SELECTED DATE ----------------
+    st.markdown(f"### 🟢 Due on {current_date_str}")
     found_due = False
     
     if not user_df.empty:
         for i, row in user_df.iterrows():
             try:
-                # Calculate if medicine is due based on the Assigned Date and the Navigator Date
+                # Math based on the date picked in the calendar
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
                 delta_days = (active_date_obj - start_dt).days
                 
                 is_due = False
-                
-                # Only show if the selected date is the start date or in the future
                 if delta_days >= 0:
                     val = int(row['freq_val'])
                     unit = row['freq_unit']
-                    
-                    if unit == "Hours":
-                        is_due = True # Hours are treated as daily requirements
+                    if unit == "Hours": is_due = True
                     elif unit == "Days":
                         if delta_days % val == 0: is_due = True
                     elif unit == "Weeks":
@@ -1176,15 +1155,12 @@ if st.session_state.page == "Medications":
 
                 if is_due:
                     found_due = True
-                    # Clean and parse existing intake logs
                     logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
-                    
-                    # Sync Check: Is the medicine taken on the specific date shown in the UI?
-                    is_taken_on_this_day = current_date_str in logs
+                    is_taken_today = current_date_str in logs
                     
                     col1, col2 = st.columns([6,1])
-                    status = "✅ Taken" if is_taken_on_this_day else "⏳ Pending"
-                    card_color = "#22c55e" if is_taken_on_this_day else "#eab308"
+                    status = "✅ Taken" if is_taken_today else "⏳ Pending"
+                    card_color = "#22c55e" if is_taken_today else "#eab308"
                     
                     col1.markdown(f"""
                     <div class="card" style="border-left: 5px solid {card_color};">
@@ -1193,19 +1169,18 @@ if st.session_state.page == "Medications":
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    if not is_taken_on_this_day:
-                        # KEY: The key includes current_date_str to force button refresh on date change
+                    if not is_taken_today:
+                        # Tick button only appears if not taken
                         if col2.button("✔️", key=f"btn_{i}_{current_date_str}"):
                             logs.append(current_date_str)
-                            
-                            # Join logs and save back to original dataframe 'df' at index 'i'
                             new_log_str = ",".join(list(set(logs)))
                             df.at[i, "taken_log"] = new_log_str
-                            
                             save_meds(df, st.session_state.username) 
                             st.rerun()
             except:
                 continue
+
+
 
     if not found_due:
         st.info("No medications scheduled for this date.")
