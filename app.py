@@ -1190,18 +1190,13 @@ if st.session_state.page == "Medications":
                     
                     if not is_taken_today:
                         if col2.button("✔️", key=f"take_{i}"):
-                            # Update the original full dataframe 'df' using the index 'i'
-                            # First, find the exact index in the main df
-                            main_idx = user_df.index[user_df.index == i][0]
-                            old_log = str(df.at[main_idx, "taken_log"])
+                            # Add date to log
+                            taken_days.append(current_date_str)
+                            new_log_str = ",".join(taken_days)
                             
-                            if old_log in ["", "nan", "None"]:
-                                new_log = current_date_str
-                            else:
-                                new_log = f"{old_log},{current_date_str}"
-                            
-                            df.at[main_idx, "taken_log"] = new_log
-                            save_meds(df)
+                            # Use original 'df' and use the specific row index 'i'
+                            df.at[i, "taken_log"] = new_log_str
+                            save_meds(df, st.session_state.username) 
                             st.rerun()
             except Exception as e:
                 continue # Skip rows with date errors to prevent total page collapse
