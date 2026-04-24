@@ -130,45 +130,33 @@ def check_login(username, password):
 
 def load_meds():
     docs = db.collection("medications").stream()
-
     rows = []
     for doc in docs:
         rows.append(doc.to_dict())
-
     if rows:
         df = pd.DataFrame(rows)
-
-        if "taken_log" not in df.columns:
-            df["taken_log"] = ""
-
-        if "dose" not in df.columns:
-            df["dose"] = 0
-
-        df["taken_log"] = df["taken_log"].astype(str)
+        # Fill missing columns for older data
+        if "freq_val" not in df.columns: df["freq_val"] = 1
+        if "freq_unit" not in df.columns: df["freq_unit"] = "Days"
+        if "assigned_date" not in df.columns: df["assigned_date"] = datetime.now().strftime("%Y-%m-%d")
+        
+        # Force correct types to prevent "collapse" bugs
+        df["freq_val"] = pd.to_numeric(df["freq_val"], errors="coerce").fillna(1)
         df["dose"] = pd.to_numeric(df["dose"], errors="coerce").fillna(0)
-
         return df
-
-    return pd.DataFrame(columns=[
-        "user",
-        "name",
-        "dose",
-        "time",
-        "food",
-        "taken_log"
-    ])
+    return pd.DataFrame(columns=["user", "name", "dose", "time", "food", "taken_log", "assigned_date", "freq_val", "freq_unit"])
 
 
-def save_meds(df):
-    current_user = st.session_state.username
-
-    docs = db.collection("medications").where("user", "==", current_user).stream()
-
+def save_meds(df, target_user):
+    # Delete existing meds for the specific target patient only
+    docs = db.collection("medications").where("user", "==", target_user).stream()
     for d in docs:
         d.reference.delete()
 
-    user_df = df[df["user"] == current_user]
+    # Filter the dataframe to only include rows for this target patient
+    user_df = df[df["user"] == target_user]
 
+    # Upload to Firestore
     for _, row in user_df.iterrows():
         db.collection("medications").add(row.to_dict())
 
@@ -248,8 +236,8 @@ if "logged_in" not in st.session_state:
     st.session_state.username = ""
     st.session_state.page = "login"
     # Replace st.session_state.day = 1 with:
-    if "current_date" not in st.session_state:
-        st.session_state.current_date = datetime.now().date()
+if "current_date" not in st.session_state:
+    st.session_state.current_date = datetime.now().date()
     st.session_state.profile_complete = False
 
 if "diet_log" not in st.session_state:
@@ -461,7 +449,14 @@ elif st.session_state.role == "doctor":
             if not target_patient.empty:
                 p_user = target_patient.iloc[0]["user"]
                 st.success(f"Connected to Patient: **{p_user}**")
-                
+            # --- INSERT THE NEW BLOCK HERE ---
+                st.markdown(f"""
+                <div class="card" style="background: rgba(6, 78, 59, 0.4); border: 1px solid #10b981; margin-bottom: 20px;">
+                    <b>📋 Patient Profile:</b> {p_user} | 
+                    🎂 Age: {target_patient.iloc[0]['age']} | 
+                    ⚧ Gender: {target_patient.iloc[0]['gender']}
+                </div>
+                """, unsafe_allow_html=True)
                 # Management Tabs
                 tab1, tab2, tab3 = st.tabs(["💊 Meds", "🥗 Diet", "📝 History"])
                 
@@ -470,21 +465,33 @@ elif st.session_state.role == "doctor":
                     m_name = st.text_input("Medicine Name", key="presc_med_name")
                     m_dose = st.number_input("Dose (mg)", min_value=0, key="presc_med_dose")
                     
+                    st.markdown("**Set Interval (Gap between doses)**")
+                    f_col1, f_col2 = st.columns([1, 2])
+                    with f_col1:
+                        f_val = st.number_input("Gap Value", min_value=1, value=1, key="presc_freq_val")
+                    with f_col2:
+                        f_unit = st.selectbox("Interval Unit", ["Hours", "Days", "Weeks", "Months"], key="presc_freq_unit")
+
                     if st.button("Confirm Prescription", key="doc_confirm_presc"):
                         df_m = load_meds()
-                        # Calculate current total dose for this specific patient
                         current_patient_dose = df_m[df_m["user"] == p_user]["dose"].sum()
                         
                         if current_patient_dose + m_dose > 1000:
-                            st.error(f"⚠️ Limit Reached! Total dosage cannot exceed 1000mg per day. (Current: {current_patient_dose}mg)")
+                            st.error(f"⚠️ Limit Reached! Patient total dosage cannot exceed 1000mg.")
                         elif m_name.strip() == "":
                             st.warning("Please enter a medicine name.")
                         else:
-                            new_med = pd.DataFrame([[p_user, m_name, m_dose, "Morning", "After Food", ""]], 
-                                                 columns=["user","name","dose","time","food","taken_log"])
-                            save_meds(pd.concat([df_m, new_med], ignore_index=True))
-                            st.success(f"✅ Prescribed {m_name} ({m_dose}mg). Total: {current_patient_dose + m_dose}mg")
-
+                            assigned_dt = datetime.now().strftime("%Y-%m-%d")
+                            
+                            new_med = pd.DataFrame([[
+                                p_user, m_name, m_dose, "Morning", "After Food", "", assigned_dt, f_val, f_unit
+                            ]], columns=["user", "name", "dose", "time", "food", "taken_log", "assigned_date", "freq_val", "freq_unit"])
+                            
+                            # CRITICAL FIX: Pass p_user here
+                            save_meds(pd.concat([df_m, new_med], ignore_index=True), p_user)
+                            st.success(f"✅ Prescribed {m_name} successfully!")
+                            st.rerun()
+                            
                 with tab2:
                     st.subheader("Assign Diet Plan")
                     diet_content = st.text_area("Write/Paste Diet Plan", key="doc_diet_text")
@@ -493,20 +500,39 @@ elif st.session_state.role == "doctor":
                             st.session_state.user_diet_plans = {}
                         st.session_state.user_diet_plans[p_user] = diet_content
                         st.success("Diet plan updated for patient.")
-
                 with tab3:
                     st.subheader("📊 Comprehensive Patient History")
                     
-                    # --- A. MEDICATION ADHERENCE ---
-                    st.markdown("#### 💊 Medication Adherence & Dosage")
-                    df_meds = load_meds()
-                    p_meds = df_meds[df_meds["user"] == p_user]
-                    if not p_meds.empty:
-                        # Display what meds they have and which days they were taken
-                        st.dataframe(p_meds[["name", "dose", "time", "taken_log"]], use_container_width=True)
-                    else:
-                        st.info("No medications prescribed.")
+                    # RE-LOAD DATA here inside the tab to capture the new prescription from Tab 1
+                    df_history = load_meds() 
+                    p_meds = df_history[df_history["user"] == p_user].copy()
 
+                    if not p_meds.empty:
+                        # Ensure numeric types for display
+                        p_meds["freq_val"] = pd.to_numeric(p_meds["freq_val"], errors="coerce").fillna(1).astype(int)
+
+                        def format_log(log_str):
+                            if not log_str or str(log_str) in ["nan", "None", ""]: return "No intake"
+                            dates = [d.strip() for d in str(log_str).split(",") if len(d.strip()) > 5]
+                            return ", ".join(dates) if dates else "No valid dates"
+
+                        p_meds["Adherence"] = p_meds["taken_log"].apply(format_log)
+                        
+                        # Formatting a 'Schedule' column for the table
+                        p_meds["Schedule"] = p_meds.apply(lambda x: f"Every {x['freq_val']} {x['freq_unit']}", axis=1)
+
+                        doc_view = p_meds[["assigned_date", "name", "dose", "Schedule", "Adherence"]].rename(columns={
+                            "assigned_date": "Date Prescribed",
+                            "name": "Medicine",
+                            "dose": "Dose (mg)"
+                        }).reset_index(drop=True)
+                        doc_view.index += 1
+                        
+                        st.table(doc_view)
+                    else:
+                        st.info("No medications prescribed yet.")
+                        
+                                             
                     # --- B. DIET & CALORIES ---
                     st.markdown("#### 🥗 Diet & Nutrition Logs")
                     # Retrieve the global diet and journal from session state
@@ -657,13 +683,21 @@ else:
         if c6.button("Profile"):
             st.session_state.page = "Profile"
 
-    # Logout
+# Logout
     if c7.button("Logout"):
+        # 1. Clear every single piece of data
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        
+        # 2. Re-initialize the absolute minimum to show the Role Selection page
         st.session_state.logged_in = False
+        st.session_state.role = None  # CRITICAL: This hides the patient/doctor UI
+        st.session_state.page = "login"
         st.session_state.username = ""
-        st.session_state.profile_complete = False
+        
+        # 3. Fresh start
         st.rerun()
-
+        
     st.markdown(f"### 👋 {st.session_state.username}")
 
     # =====================================================
@@ -1039,107 +1073,184 @@ else:
         else:
             st.info("No adherence data yet")
             
-# ---------------- MEDICATIONS PAGE (WITH 1000mg LIMIT) ----------------
+# ---------------- MEDICATIONS PAGE (COMPLETE & FIXED) ----------------
 if st.session_state.page == "Medications":
     st.subheader("💊 Medication Manager")
-    df = load_meds()
-    user_df = df[df["user"] == st.session_state.username]
     
-    # Calculate current total dosage for the user
+    # 1. Load and Clean Data
+    df = load_meds()
+    
+    # Critical: Ensure columns exist and have correct types to prevent UI collapse
+    required_cols = {
+        "freq_val": 1, 
+        "freq_unit": "Days", 
+        "assigned_date": datetime.now().strftime("%Y-%m-%d"),
+        "taken_log": ""
+    }
+    for col, default in required_cols.items():
+        if col not in df.columns:
+            df[col] = default
+
+    # Filter for current logged-in user
+    user_df = df[df["user"] == st.session_state.username].copy()
+    
+    # Convert numeric columns to prevent calculation errors
+    user_df["dose"] = pd.to_numeric(user_df["dose"], errors="coerce").fillna(0)
+    user_df["freq_val"] = pd.to_numeric(user_df["freq_val"], errors="coerce").fillna(1)
+    
     current_daily_total = user_df["dose"].sum()
 
+    # 2. Add New Medicine Section
     with st.expander("➕ Add New Medicine"):
         st.markdown(f"**Current Daily Total:** `{current_daily_total}mg / 1000mg`")
         
         name = st.text_input("Medicine Name")
         dose = st.number_input("Dose (mg)", min_value=0, step=10)
-        time = st.selectbox("Time", ["Morning","Afternoon","Night"])
+        
+        st.markdown("**Set Interval (Gap between doses)**")
+        f_col1, f_col2 = st.columns([1, 2])
+        with f_col1:
+            f_val = st.number_input("Gap Value", min_value=1, value=1)
+        with f_col2:
+            f_unit = st.selectbox("Interval Unit", ["Hours", "Days", "Weeks", "Months"])
+            
+        time = st.selectbox("Preferred Time", ["Morning","Afternoon","Night"])
         food = st.selectbox("Food", ["Before Food","After Food"])
         
         if st.button("Add Medicine"):
             if name.strip() == "":
                 st.error("Please enter a medicine name.")
-            # SAFETY CHECK: 1000mg Limit
             elif current_daily_total + dose > 1000:
-                st.error(f"⚠️ Limit Reached! Adding this would bring your total to {current_daily_total + dose}mg. Daily maximum is 1000mg.")
+                st.error(f"⚠️ Limit Reached! Daily maximum is 1000mg.")
             else:
-                new = pd.DataFrame([[st.session_state.username, name, dose, time, food, ""]], 
-                                 columns=["user","name","dose","time","food","taken_log"])
-                df = pd.concat([df, new], ignore_index=True)
-                save_meds(df)
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                new_row = pd.DataFrame([[
+                    st.session_state.username, name, dose, time, food, "", today_str, f_val, f_unit
+                ]], columns=["user","name","dose","time","food","taken_log", "assigned_date", "freq_val", "freq_unit"])
+                
+                df = pd.concat([df, new_row], ignore_index=True)
+                # FIX: Pass the username here
+                save_meds(df, st.session_state.username) 
                 st.success(f"Added {name} successfully!")
                 st.rerun()
     
     st.markdown("---")
     
-    # --- DATE NAVIGATOR REPLACEMENT ---
+    # 3. Date Navigation and Display
     current_date_str = date_navigator("meds")
     st.subheader(f"📅 Log for {current_date_str}")
     
-    # Filter again to ensure we have fresh data after additions
-    user_df = df[df["user"] == st.session_state.username]
-
-    if user_df.empty:
-        st.info("No medicines added yet. Use the expander above to start.")
-    else:
-        st.markdown("### 🟢 Today's Schedule")
+    # 4. Smart Filtering Logic (The "Gap" Logic)
+    st.markdown("### 🟢 Due Today")
+    found_due = False
+    
+    if not user_df.empty:
         for i, row in user_df.iterrows():
-            taken_days = str(row["taken_log"]).split(",")
-            is_taken_today = current_date_str in taken_days
-            
-            col1, col2 = st.columns([6,1])
-            status = "✅ Taken" if is_taken_today else "⏳ Pending"
-            
-            col1.markdown(f"""
-            <div class="card">
-                💊 <b>{row['name']}</b> — {row['dose']}mg<br>
-                🕒 {row['time']} | 🍽 {row['food']}<br>
-                📌 Status: {status}
-            </div>
-            """, unsafe_allow_html=True)
-            
-            if not is_taken_today:
-                if col2.button("✔️", key=f"take_{i}"):
-                    new_log = str(row["taken_log"])
-                    if new_log in ["", "nan", "None"]:
-                        new_log = current_date_str
-                    else:
-                        new_log = f"{new_log},{current_date_str}"
+            try:
+                # Calculate if the medicine is due based on the picked date
+                start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
+                picked_dt = st.session_state.current_date
+                delta_days = (picked_dt - start_dt).days
+                
+                is_due = False
+                
+                # Logic: Only show if today is >= start date
+                if delta_days >= 0:
+                    unit = row['freq_unit']
+                    val = int(row['freq_val'])
                     
-                    df.at[i, "taken_log"] = new_log
-                    save_meds(df)
-                    st.rerun()
+                    if unit == "Hours":
+                        # Hours logic: If defined, it usually means multiple times a day or every day
+                        # For this dashboard, Hours/24hrs is treated as "Daily"
+                        is_due = True
+                    elif unit == "Days":
+                        if delta_days % val == 0: is_due = True
+                    elif unit == "Weeks":
+                        if delta_days % (val * 7) == 0: is_due = True
+                    elif unit == "Months":
+                        if delta_days % (val * 30) == 0: is_due = True
 
-        st.markdown("---")
-        st.markdown("### 📋 Management (All Prescriptions)")
+                if is_due:
+                    found_due = True
+                    taken_days = str(row["taken_log"]).split(",")
+                    is_taken_today = current_date_str in taken_days
+                    
+                    col1, col2 = st.columns([6,1])
+                    status = "✅ Taken" if is_taken_today else "⏳ Pending"
+                    card_border = "#22c55e" if is_taken_today else "#eab308"
+                    
+                    col1.markdown(f"""
+                    <div class="card" style="border-left: 5px solid {card_border};">
+                        💊 <b>{row['name']}</b> — {row['dose']}mg<br>
+                        🕒 {row['time']} | 🍽 {row['food']}<br>
+                        🔄 Schedule: Every {val} {unit}<br>
+                        📌 Status: {status}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    if not is_taken_today:
+                        if col2.button("✔️", key=f"take_{i}"):
+                            # Update the original full dataframe 'df' using the index 'i'
+                            # First, find the exact index in the main df
+                            main_idx = user_df.index[user_df.index == i][0]
+                            old_log = str(df.at[main_idx, "taken_log"])
+                            
+                            if old_log in ["", "nan", "None"]:
+                                new_log = current_date_str
+                            else:
+                                new_log = f"{old_log},{current_date_str}"
+                            
+                            df.at[main_idx, "taken_log"] = new_log
+                            save_meds(df)
+                            st.rerun()
+            except Exception as e:
+                continue # Skip rows with date errors to prevent total page collapse
+
+    if not found_due:
+        st.info("No medications scheduled for this date.")
+
+    # 5. Adherence Graph
+    st.markdown("---")
+    st.markdown("### 📊 Adherence & Dosage Trend")
+    
+    graph_data = []
+    if not user_df.empty:
+        for _, row in user_df.iterrows():
+            logs = str(row["taken_log"]).split(",")
+            for d in logs:
+                d = d.strip()
+                if len(d) > 5: # Valid YYYY-MM-DD check
+                    graph_data.append({"day": d, "dose": row["dose"]})
+    
+    if graph_data:
+        graph_df = pd.DataFrame(graph_data)
+        # Sum dosages per day
+        chart_pivot = graph_df.groupby("day")["dose"].sum()
+        st.line_chart(chart_pivot)
+    else:
+        st.caption("Complete your daily intake to see trends.") 
+
+    # 6. Management (Delete Records)
+    st.markdown("### 📋 Management (All Prescriptions)")
+    if not user_df.empty:
         for i, row in user_df.iterrows():
             col1, col2 = st.columns([6,1])
+            assigned_dt = row.get('assigned_date', 'N/A')
+            
             col1.markdown(f"""
             <div class="card" style="border-left: 5px solid #38bdf8;">
                 <b>{row['name']}</b> ({row['dose']}mg)<br>
-                <small>Logged on dates: {row['taken_log'] if row['taken_log'] else 'None'}</small>
+                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small><br>
+                <small>📅 <b>Prescribed On:</b> {assigned_dt}</small>
             </div>
             """, unsafe_allow_html=True)
             
             if col2.button("❌", key=f"del_{i}"):
                 df = df.drop(i)
-                save_meds(df)
+                # FIX: Pass the username here
+                save_meds(df, st.session_state.username) 
                 st.rerun()
-
-        st.markdown("### 📊 Adherence & Dosage Trend")
-        graph_data = []
-        for _, row in user_df.iterrows():
-            if row["taken_log"]:
-                for d in str(row["taken_log"]).split(","):
-                    graph_data.append({"day": d, "dose": row["dose"]})
-        
-        if graph_data:
-            graph_df = pd.DataFrame(graph_data)
-            chart_pivot = graph_df.groupby("day")["dose"].sum()
-            st.line_chart(chart_pivot)
-        else:
-            st.caption("Complete your daily intake to see trends.")         
-
+                
 # ---------------- DIET PANEL (STABLE GROQ VERSION) ----------------
 elif st.session_state.page == "Diet":
     st.subheader("🥗 Smart AI Diet & Nutrition")
