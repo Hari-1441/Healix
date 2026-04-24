@@ -1141,65 +1141,64 @@ if st.session_state.page == "Medications":
     st.subheader(f"📅 Log for {current_date_str}")
     
     # 4. Smart Filtering Logic (The "Gap" Logic)
+# 3. Due Today Logic
     st.markdown("### 🟢 Due Today")
     found_due = False
     
+    # We use this specific variable to make sure the tick follows the navigator
+    # This is the date the user is CURRENTLY LOOKING AT in the UI
+    active_date_str = st.session_state.current_date.strftime("%Y-%m-%d")
+
     if not user_df.empty:
         for i, row in user_df.iterrows():
             try:
-                # Calculate if the medicine is due based on the picked date
+                # Calculate gap
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
                 picked_dt = st.session_state.current_date
                 delta_days = (picked_dt - start_dt).days
                 
                 is_due = False
-                
-                # Logic: Only show if today is >= start date
                 if delta_days >= 0:
-                    unit = row['freq_unit']
                     val = int(row['freq_val'])
-                    
-                    if unit == "Hours":
-                        # Hours logic: If defined, it usually means multiple times a day or every day
-                        # For this dashboard, Hours/24hrs is treated as "Daily"
-                        is_due = True
-                    elif unit == "Days":
-                        if delta_days % val == 0: is_due = True
-                    elif unit == "Weeks":
-                        if delta_days % (val * 7) == 0: is_due = True
-                    elif unit == "Months":
-                        if delta_days % (val * 30) == 0: is_due = True
+                    unit = row['freq_unit']
+                    if unit == "Hours" or (unit == "Days" and delta_days % val == 0): is_due = True
+                    elif unit == "Weeks" and delta_days % (val * 7) == 0: is_due = True
+                    elif unit == "Months" and delta_days % (val * 30) == 0: is_due = True
 
                 if is_due:
                     found_due = True
-                    taken_days = str(row["taken_log"]).split(",")
-                    is_taken_today = current_date_str in taken_days
+                    # Get existing logs
+                    taken_days = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
+                    
+                    # CHECK: Is the date we are LOOKING AT already in the log?
+                    is_taken_on_selected_date = active_date_str in taken_days
                     
                     col1, col2 = st.columns([6,1])
-                    status = "✅ Taken" if is_taken_today else "⏳ Pending"
-                    card_border = "#22c55e" if is_taken_today else "#eab308"
+                    status = "✅ Taken" if is_taken_on_selected_date else "⏳ Pending"
+                    card_border = "#22c55e" if is_taken_on_selected_date else "#eab308"
                     
                     col1.markdown(f"""
                     <div class="card" style="border-left: 5px solid {card_border};">
                         💊 <b>{row['name']}</b> — {row['dose']}mg<br>
                         🕒 {row['time']} | 🍽 {row['food']}<br>
-                        🔄 Schedule: Every {val} {unit}<br>
+                        🔄 Every {val} {unit} | 📅 Prescribed: {row['assigned_date']}<br>
                         📌 Status: {status}
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    if not is_taken_today:
-                        if col2.button("✔️", key=f"take_{i}"):
-                            # Add date to log
-                            taken_days.append(current_date_str)
-                            new_log_str = ",".join(taken_days)
+                    if not is_taken_on_selected_date:
+                        if col2.button("✔️", key=f"take_{i}_{active_date_str}"): # Unique key includes date
+                            # IMPORTANT: We add the date from the NAVIGATOR, not the real today
+                            taken_days.append(active_date_str)
+                            new_log_str = ",".join(list(set(taken_days))) # set() prevents duplicates
                             
-                            # Use original 'df' and use the specific row index 'i'
+                            # Update the original 'df' at the correct index
                             df.at[i, "taken_log"] = new_log_str
                             save_meds(df, st.session_state.username) 
+                            st.success(f"Logged for {active_date_str}")
                             st.rerun()
             except Exception as e:
-                continue # Skip rows with date errors to prevent total page collapse
+                continue
 
     if not found_due:
         st.info("No medications scheduled for this date.")
