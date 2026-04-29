@@ -523,10 +523,10 @@ elif st.session_state.role == "doctor":
                     else:
                         st.info("No medications prescribed yet.")
                                              
-                    # 2. Recent Diet History (Synced from Cloud - Top 5)
+                    # 2. Recent Diet History (Synced from Cloud - Last 5 Unique Entries)
                     st.markdown("#### 🥗 Recent Nutrition Logs (Past 5 Entries)")
                     
-                    # Fetch all logs for the patient from Firestore
+                    # Fetch logs for the specific patient
                     diet_query = db.collection("diet_logs").where("user", "==", p_user).stream()
                     
                     all_diet_logs = []
@@ -534,8 +534,9 @@ elif st.session_state.role == "doctor":
                         all_diet_logs.append(d_doc.to_dict())
                     
                     if all_diet_logs:
-                        # Sort by date descending so the doctor sees the most recent first
-                        all_diet_logs.sort(key=lambda x: x.get('date', ''), reverse=True)
+                        # Sort by the actual 'timestamp' field (not just date string) 
+                        # This ensures multiple logs on the same day appear correctly in order
+                        all_diet_logs.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
                         
                         # Show exactly the top 5 most recent entries
                         for d_data in all_diet_logs[:5]:
@@ -554,12 +555,12 @@ elif st.session_state.role == "doctor":
                     notes_df = load_notes() 
                     p_notes = notes_df[notes_df["user"] == p_user]
                     if not p_notes.empty:
+                        # Display clinical notes with relevant columns
                         display_notes = p_notes[["day", "tag", "note", "time"]].rename(columns={"day": "Date"})
                         st.table(display_notes)
                     else:
                         st.info("No patient notes found.")
-                
-        
+                        
 # ---------------- 3. LOGIN / CREATE (PATIENT) ----------------
 elif st.session_state.role == "patient" and not st.session_state.logged_in:
     col1, col2, col3 = st.columns([1,1,1])
@@ -1323,16 +1324,21 @@ elif st.session_state.page == "Diet":
 
     if st.button("💾 Save Journal & Calories"):
         if user_meals.strip() != "":
+            # Generate a unique ID using date + exact time
+            timestamp_str = datetime.now().strftime("%H%M%S")
+            unique_log_id = f"{current_user}_{current_date_str}_{timestamp_str}"
+            
             log_data = {
                 "user": current_user,
                 "date": current_date_str,
                 "meals": user_meals,
                 "calories": int(calories),
-                "timestamp": datetime.now()
+                "timestamp": datetime.now() # Used for precise sorting
             }
-            # CHANGE: Save to 'diet_logs' collection with a unique ID per user/day
-            db.collection("diet_logs").document(log_id).set(log_data)
-            st.success("✅ Synced to Cloud!")
+            
+            # Save as a unique document
+            db.collection("diet_logs").document(unique_log_id).set(log_data)
+            st.success("✅ Entry added to history!")
             st.rerun()
 
     # ===================================
@@ -1347,26 +1353,29 @@ elif st.session_state.page == "Diet":
             st.success(f"✅ Healthy intake ({calories} kcal)")
 
 # ===================================
-    # HISTORY DISPLAY (UNLIMITED CLOUD SYNC)
+    # HISTORY DISPLAY (UNLIMITED UNIQUE LOGS)
     # ===================================
     st.markdown("---")
     st.subheader("📜 Full Food Journal History")
 
-    # Fetch every log for this user from Firestore (No Limit)
+    # Fetch every log for this user
     history_query = db.collection("diet_logs").where("user", "==", current_user).stream()
     
     cloud_history = []
     for doc in history_query:
-        cloud_history.append(doc.to_dict())
+        data = doc.to_dict()
+        data['doc_id'] = doc.id # Store ID for deletion
+        cloud_history.append(data)
 
     if cloud_history:
-        # Sort by date string descending so newest is on top
-        cloud_history.sort(key=lambda x: x.get('date', ''), reverse=True)
+        # Sort by the actual timestamp object (Newest first)
+        cloud_history.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
         
         for entry in cloud_history:
             d_part = entry.get('date', 'Unknown')
             m_text = entry.get('meals', '')
             c_val = entry.get('calories', 0)
+            d_id = entry.get('doc_id')
             
             col_h1, col_h2 = st.columns([6, 1])
             col_h1.markdown(f"""
@@ -1377,9 +1386,9 @@ elif st.session_state.page == "Diet":
                 </div>
             """, unsafe_allow_html=True)
             
-            # Delete button (Removes from Cloud)
-            if col_h2.button("🗑️", key=f"del_cloud_{d_part}"):
-                db.collection("diet_logs").document(f"{current_user}_{d_part}").delete()
+            # Delete button using the unique document ID
+            if col_h2.button("🗑️", key=f"del_{d_id}"):
+                db.collection("diet_logs").document(d_id).delete()
                 st.rerun()
     else:
         st.info("No food history found in your cloud account.")
