@@ -1136,14 +1136,13 @@ if st.session_state.page == "Medications":
     active_date_obj = st.session_state.current_date 
 
     # ---------------- 4. MEDICINES DUE ON SELECTED DATE ----------------
+# ---------------- 4. MEDICINES DUE ON SELECTED DATE ----------------
     st.markdown(f"### 🟢 Due on {current_date_str}")
     found_due = False
     
     if not user_df.empty:
-        for _, row in user_df.iterrows():
-            i = row["index"]
+        for i, row in user_df.iterrows():  # i is the original index
             try:
-                # Math based on the date picked in the calendar
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
                 delta_days = (active_date_obj - start_dt).days
                 
@@ -1161,8 +1160,9 @@ if st.session_state.page == "Medications":
 
                 if is_due:
                     found_due = True
-                    logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
-                    is_taken_today = current_date_str in logs
+                    # Cleanly parse logs
+                    current_logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
+                    is_taken_today = current_date_str in current_logs
                     
                     col1, col2 = st.columns([6,1])
                     status = "✅ Taken" if is_taken_today else "⏳ Pending"
@@ -1176,19 +1176,14 @@ if st.session_state.page == "Medications":
                     """, unsafe_allow_html=True)
                     
                     if not is_taken_today:
-                        # Use the original DataFrame index 'i' directly from iterrows()
                         if col2.button("✔️", key=f"tick_{i}", use_container_width=True):
-                            # Get the current string from the master 'df'
-                            raw_val = str(df.at[i, "taken_log"])
+                            # Use a set to prevent duplication
+                            log_set = set(current_logs)
+                            log_set.add(current_date_str)
                             
-                            # Use a set to prevent any duplicate days
-                            existing_days = {d.strip() for d in raw_val.split(",") if len(d.strip()) > 5}
-                            existing_days.add(current_date_str)
-                            
-                            # Update master 'df'
-                            df.at[i, "taken_log"] = ",".join(list(existing_days))
-                            
-                            save_meds(df, st.session_state.username)
+                            # Update the MASTER dataframe 'df' at original index 'i'
+                            df.at[i, "taken_log"] = ",".join(list(log_set))
+                            save_meds(df, st.session_state.username) 
                             st.rerun()
             except:
                 continue
@@ -1219,24 +1214,23 @@ if st.session_state.page == "Medications":
     else:
         st.caption("Complete your daily intake to see trends.") 
 
-    # 6. Management (Delete Records)
-    # 6. Management (Delete Records)
+# 6. Management (Delete Records)
     st.markdown("### 📋 Management (All Prescriptions)")
     if not user_df.empty:
-        # Use .index to get the actual row position from the original 'df'
-        for i in user_df.index:
-            row = user_df.loc[i]
+        for i, row in user_df.iterrows(): # i is the original index
             col1, col2 = st.columns([6,1])
-            
+            assigned_dt = row.get("assigned_date", "N/A")
+
             col1.markdown(f"""
             <div class="card" style="border-left:5px solid #38bdf8;">
                 <b>{row['name']}</b> ({row['dose']}mg)<br>
-                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small>
+                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small><br>
+                <small>📅 Prescribed On: {assigned_dt}</small>
             </div>
             """, unsafe_allow_html=True)
 
-            if col2.button("❌", key=f"delete_med_{i}", use_container_width=True):
-                # Dropping from master 'df' using the absolute index
+            if col2.button("❌", key=f"del_{i}", use_container_width=True):
+                # Drop directly from master df using index i
                 df = df.drop(index=i)
                 save_meds(df, st.session_state.username)
                 st.rerun()
