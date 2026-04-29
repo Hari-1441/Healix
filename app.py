@@ -73,8 +73,10 @@ def save_notes(df):
 
     docs = db.collection("notes").where("user", "==", current_user).stream()
 
+    batch = db.batch()
     for d in docs:
-        d.reference.delete()
+        batch.delete(d.reference)
+    batch.commit()
 
     user_df = df[df["user"] == current_user]
 
@@ -159,6 +161,7 @@ def save_meds(df, target_user):
     # Upload to Firestore
     for _, row in user_df.iterrows():
         db.collection("medications").add(row.to_dict())
+    
 
 def ask_groq_health_bot(question):
     try:
@@ -674,9 +677,8 @@ else:
 
 # Logout
     if c7.button("Logout"):
-        # 1. Clear every single piece of data
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
+        st.session_state.clear()
+        st.rerun()
         
         # 2. Re-initialize the absolute minimum to show the Role Selection page
         st.session_state.logged_in = False
@@ -1082,6 +1084,7 @@ if st.session_state.page == "Medications":
 
     # Filter for current logged-in user
     user_df = df[df["user"] == st.session_state.username].copy()
+    user_df = user_df.reset_index(drop=False)
     
     # Convert numeric columns to prevent calculation errors
     user_df["dose"] = pd.to_numeric(user_df["dose"], errors="coerce").fillna(0)
@@ -1106,7 +1109,7 @@ if st.session_state.page == "Medications":
         time = st.selectbox("Preferred Time", ["Morning","Afternoon","Night"])
         food = st.selectbox("Food", ["Before Food","After Food"])
         
-        if st.button("Add Medicine"):
+        if st.button("Add Medicine", type="primary"):
             if name.strip() == "":
                 st.error("Please enter a medicine name.")
             elif current_daily_total + dose > 1000:
@@ -1135,7 +1138,8 @@ if st.session_state.page == "Medications":
     found_due = False
     
     if not user_df.empty:
-        for i, row in user_df.iterrows():
+        for _, row in user_df.iterrows():
+            i = row["index"]
             try:
                 # Math based on the date picked in the calendar
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
@@ -1155,7 +1159,11 @@ if st.session_state.page == "Medications":
 
                 if is_due:
                     found_due = True
-                    logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
+                    raw_log = row.get("taken_log", "")
+                    if pd.isna(raw_log):
+                        raw_log = ""
+
+                    logs = [d.strip() for d in str(raw_log).split(",") if d.strip()]
                     is_taken_today = current_date_str in logs
                     
                     col1, col2 = st.columns([6,1])
@@ -1171,11 +1179,22 @@ if st.session_state.page == "Medications":
                     
                     if not is_taken_today:
                         # Tick button only appears if not taken
-                        if col2.button("✔️", key=f"btn_{i}_{current_date_str}"):
-                            logs.append(current_date_str)
-                            new_log_str = ",".join(list(set(logs)))
-                            df.at[i, "taken_log"] = new_log_str
-                            save_meds(df, st.session_state.username) 
+                        if col2.button("✔️", key=f"tick_{row['name']}_{i}_{current_date_str}", use_container_width=True):
+
+                            raw_log = row.get("taken_log", "")
+                            if pd.isna(raw_log):
+                                raw_log = ""
+
+                            logs = [d.strip() for d in str(raw_log).split(",") if d.strip()]
+
+                            if current_date_str not in logs:
+                                logs.append(current_date_str)
+
+                            df.at[i, "taken_log"] = ",".join(logs)
+
+                            save_meds(df, st.session_state.username)
+
+                            st.success("Medicine marked as taken")
                             st.rerun()
             except:
                 continue
@@ -1209,22 +1228,23 @@ if st.session_state.page == "Medications":
     # 6. Management (Delete Records)
     st.markdown("### 📋 Management (All Prescriptions)")
     if not user_df.empty:
-        for i, row in user_df.iterrows():
+        for _, row in user_df.iterrows():
+            i = row["index"]
+
             col1, col2 = st.columns([6,1])
-            assigned_dt = row.get('assigned_date', 'N/A')
-            
+            assigned_dt = row.get("assigned_date", "N/A")
+
             col1.markdown(f"""
-            <div class="card" style="border-left: 5px solid #38bdf8;">
+            <div class="card" style="border-left:5px solid #38bdf8;">
                 <b>{row['name']}</b> ({row['dose']}mg)<br>
                 <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small><br>
-                <small>📅 <b>Prescribed On:</b> {assigned_dt}</small>
+                <small>📅 Prescribed On: {assigned_dt}</small>
             </div>
             """, unsafe_allow_html=True)
-            
+
             if col2.button("❌", key=f"del_{i}"):
-                df = df.drop(i)
-                # FIX: Pass the username here
-                save_meds(df, st.session_state.username) 
+                df = df.drop(index=i)
+                save_meds(df, st.session_state.username)
                 st.rerun()
                 
 # ---------------- DIET PANEL (STABLE GROQ VERSION) ----------------
@@ -1381,16 +1401,7 @@ elif st.session_state.page == "Notes":
     # --- DATE NAVIGATOR ADDITION ---
     current_date_str = date_navigator("notes")
     
-    NOTES_FILE = "notes.csv"
-    
-    def load_notes():
-        if os.path.exists(NOTES_FILE):
-            return pd.read_csv(NOTES_FILE)
-        return pd.DataFrame(columns=["user","day","note","tag","time"])
-        
-    def save_notes(df):
-        df.to_csv(NOTES_FILE, index=False)
-        
+
     notes_df = load_notes()
     user_notes = notes_df[notes_df["user"] == st.session_state.username]
     
