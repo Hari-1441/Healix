@@ -677,8 +677,9 @@ else:
 
 # Logout
     if c7.button("Logout"):
-        st.session_state.clear()
-        st.rerun()
+        # 1. Clear every single piece of data
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
         
         # 2. Re-initialize the absolute minimum to show the Role Selection page
         st.session_state.logged_in = False
@@ -916,17 +917,7 @@ else:
     # ---------------- DASHBOARD (GLASS UI) ----------------
     elif st.session_state.page == "Dashboard":
         df = load_meds()
-        # Ensure permanent medicine ID exists in MAIN dataframe
-        if "med_id" not in df.columns:
-            df["med_id"] = df.index.astype(str)
-        else:
-            df["med_id"] = df["med_id"].astype(str)
         user_df = df[df["user"] == st.session_state.username]
-                # create permanent unique row id
-        if "med_id" not in user_df.columns:
-            user_df["med_id"] = user_df.index.astype(str)
-
-        user_df = user_df.reset_index(drop=True)
         NOTE_FILE = "notes.csv"
         
         # ---------------- CALCULATIONS ----------------
@@ -1094,12 +1085,7 @@ if st.session_state.page == "Medications":
 
     # Filter for current logged-in user
     user_df = df[df["user"] == st.session_state.username].copy()
-
-    # create permanent unique row id
-    if "med_id" not in user_df.columns:
-        user_df["med_id"] = user_df.index.astype(str)
-
-    user_df = user_df.reset_index(drop=True)
+    user_df = user_df.reset_index()
     
     # Convert numeric columns to prevent calculation errors
     user_df["dose"] = pd.to_numeric(user_df["dose"], errors="coerce").fillna(0)
@@ -1131,31 +1117,10 @@ if st.session_state.page == "Medications":
                 st.error(f"⚠️ Limit Reached! Daily maximum is 1000mg.")
             else:
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                import uuid
-
                 new_row = pd.DataFrame([[
-                    str(uuid.uuid4()),
-                    st.session_state.username,
-                    name,
-                    dose,
-                    time,
-                    food,
-                    "",
-                    today_str,
-                    f_val,
-                    f_unit
-                ]], columns=[
-                    "med_id",
-                    "user",
-                    "name",
-                    "dose",
-                    "time",
-                    "food",
-                    "taken_log",
-                    "assigned_date",
-                    "freq_val",
-                    "freq_unit"
-                ])
+                    st.session_state.username, name, dose, time, food, "", today_str, f_val, f_unit
+                ]], columns=["user","name","dose","time","food","taken_log", "assigned_date", "freq_val", "freq_unit"])
+                
                 df = pd.concat([df, new_row], ignore_index=True)
                 # FIX: Pass the username here
                 save_meds(df, st.session_state.username) 
@@ -1175,7 +1140,7 @@ if st.session_state.page == "Medications":
     
     if not user_df.empty:
         for _, row in user_df.iterrows():
-            med_id = str(row["med_id"])
+            i = row["index"]
             try:
                 # Math based on the date picked in the calendar
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
@@ -1195,11 +1160,7 @@ if st.session_state.page == "Medications":
 
                 if is_due:
                     found_due = True
-                    raw_log = row.get("taken_log", "")
-                    if pd.isna(raw_log):
-                        raw_log = ""
-
-                    logs = [d.strip() for d in str(raw_log).split(",") if d.strip()]
+                    logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
                     is_taken_today = current_date_str in logs
                     
                     col1, col2 = st.columns([6,1])
@@ -1215,25 +1176,19 @@ if st.session_state.page == "Medications":
                     
                     if not is_taken_today:
                         # Tick button only appears if not taken
-                        if col2.button("✔️", key=f"tick_{med_id}_{current_date_str}", use_container_width=True):
-
-                            row_index = df[df["med_id"].astype(str) == med_id].index[0]
-
-                            raw_log = df.at[row_index, "taken_log"]
-
-                            if pd.isna(raw_log):
-                                raw_log = ""
-
-                            logs = [d.strip() for d in str(raw_log).split(",") if d.strip()]
-
+                        if col2.button("✔️", key=f"btn_{i}", use_container_width=True):
+                            # Correctly update the original dataframe 'df' using the tracked index 'i'
+                            existing_logs = str(df.at[i, "taken_log"]).split(",")
+                            logs = [d.strip() for d in existing_logs if len(d.strip()) > 5]
+                            
                             if current_date_str not in logs:
                                 logs.append(current_date_str)
-
-                            df.at[row_index, "taken_log"] = ",".join(logs)
-
-                            save_meds(df, st.session_state.username)
-
-                            st.rerun()
+                                new_log_str = ",".join(logs)
+                                df.at[i, "taken_log"] = new_log_str
+                                
+                                # Save the updated original dataframe
+                                save_meds(df, st.session_state.username) 
+                                st.rerun()
             except:
                 continue
 
@@ -1267,7 +1222,8 @@ if st.session_state.page == "Medications":
     st.markdown("### 📋 Management (All Prescriptions)")
     if not user_df.empty:
         for _, row in user_df.iterrows():
-            med_id = str(row["med_id"])
+            # 'i' corresponds to the index in the original 'df' 
+            i = row["index"]
 
             col1, col2 = st.columns([6,1])
             assigned_dt = row.get("assigned_date", "N/A")
@@ -1280,14 +1236,10 @@ if st.session_state.page == "Medications":
             </div>
             """, unsafe_allow_html=True)
 
-            if col2.button("❌", key=f"del_{med_id}"):
-
-                row_index = df[df["med_id"].astype(str) == med_id].index[0]
-
-                df = df.drop(index=row_index)
-
+            # Use the original index 'i' to ensure the correct row is dropped
+            if col2.button("❌", key=f"del_{i}", use_container_width=True):
+                df = df.drop(index=i)
                 save_meds(df, st.session_state.username)
-
                 st.rerun()
                 
 # ---------------- DIET PANEL (STABLE GROQ VERSION) ----------------
