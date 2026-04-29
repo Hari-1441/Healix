@@ -523,10 +523,10 @@ elif st.session_state.role == "doctor":
                     else:
                         st.info("No medications prescribed yet.")
                                              
-                    # 2. Recent Diet History (Synced from Firestore - Last 3 Logs)
-                    st.markdown("#### 🥗 Recent Nutrition Logs (Last 3 entries)")
+                    # 2. Recent Diet History (Synced from Cloud - Top 5)
+                    st.markdown("#### 🥗 Recent Nutrition Logs (Past 5 Entries)")
                     
-                    # Fetch logs for the user without ordering in the query to avoid Index Error
+                    # Fetch all logs for the patient from Firestore
                     diet_query = db.collection("diet_logs").where("user", "==", p_user).stream()
                     
                     all_diet_logs = []
@@ -534,9 +534,11 @@ elif st.session_state.role == "doctor":
                         all_diet_logs.append(d_doc.to_dict())
                     
                     if all_diet_logs:
-                        # Sort by date string descending and show top 3
+                        # Sort by date descending so the doctor sees the most recent first
                         all_diet_logs.sort(key=lambda x: x.get('date', ''), reverse=True)
-                        for d_data in all_diet_logs[:3]:
+                        
+                        # Show exactly the top 5 most recent entries
+                        for d_data in all_diet_logs[:5]:
                             st.markdown(f"""
                             <div class="card" style="border-left: 5px solid #10b981;">
                                 <b>📅 Date:</b> {d_data.get('date', 'Unknown')}<br>
@@ -552,7 +554,6 @@ elif st.session_state.role == "doctor":
                     notes_df = load_notes() 
                     p_notes = notes_df[notes_df["user"] == p_user]
                     if not p_notes.empty:
-                        # Filter out internal tracking columns for doctor view
                         display_notes = p_notes[["day", "tag", "note", "time"]].rename(columns={"day": "Date"})
                         st.table(display_notes)
                     else:
@@ -1346,12 +1347,12 @@ elif st.session_state.page == "Diet":
             st.success(f"✅ Healthy intake ({calories} kcal)")
 
 # ===================================
-    # HISTORY DISPLAY (FETCH FROM CLOUD)
+    # HISTORY DISPLAY (UNLIMITED CLOUD SYNC)
     # ===================================
     st.markdown("---")
-    st.subheader("📜 Food Journal History")
+    st.subheader("📜 Full Food Journal History")
 
-    # Fetch all logs for this user from Firestore
+    # Fetch every log for this user from Firestore (No Limit)
     history_query = db.collection("diet_logs").where("user", "==", current_user).stream()
     
     cloud_history = []
@@ -1359,7 +1360,7 @@ elif st.session_state.page == "Diet":
         cloud_history.append(doc.to_dict())
 
     if cloud_history:
-        # Sort by date descending
+        # Sort by date string descending so newest is on top
         cloud_history.sort(key=lambda x: x.get('date', ''), reverse=True)
         
         for entry in cloud_history:
@@ -1376,12 +1377,12 @@ elif st.session_state.page == "Diet":
                 </div>
             """, unsafe_allow_html=True)
             
-            # Delete button (Now deletes from Cloud)
+            # Delete button (Removes from Cloud)
             if col_h2.button("🗑️", key=f"del_cloud_{d_part}"):
                 db.collection("diet_logs").document(f"{current_user}_{d_part}").delete()
                 st.rerun()
     else:
-        st.info("No food history available in the cloud yet.")
+        st.info("No food history found in your cloud account.")
 
 # ---------------- NOTES PANEL (AI UPGRADED) ----------------
 elif st.session_state.page == "Notes":
