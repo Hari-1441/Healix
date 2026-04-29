@@ -242,8 +242,7 @@ if "current_date" not in st.session_state:
 if "diet_log" not in st.session_state:
     st.session_state.diet_log = {}
     # --- ADD THESE TWO LINES HERE ---
-if "user_diet_plans" not in st.session_state:
-    st.session_state.user_diet_plans = {}
+
 
 if "food_journal" not in st.session_state:
     st.session_state.food_journal = {}
@@ -521,10 +520,10 @@ elif st.session_state.role == "doctor":
                     else:
                         st.info("No medications prescribed yet.")
                                              
-                    # 2. Diet History (Synced from Firestore - Python Sorted to avoid Index Error)
-                    st.markdown("#### 🥗 Recent Nutrition Logs")
+                    # 2. Recent Diet History (Synced from Firestore - Last 3 Logs)
+                    st.markdown("#### 🥗 Recent Nutrition Logs (Last 3 entries)")
                     
-                    # Fetch logs for the user without ordering in the query
+                    # Fetch logs for the user without ordering in the query to avoid Index Error
                     diet_query = db.collection("diet_logs").where("user", "==", p_user).stream()
                     
                     all_diet_logs = []
@@ -532,9 +531,9 @@ elif st.session_state.role == "doctor":
                         all_diet_logs.append(d_doc.to_dict())
                     
                     if all_diet_logs:
-                        # Sort by date string descending and show top 5
+                        # Sort by date string descending and show top 3
                         all_diet_logs.sort(key=lambda x: x.get('date', ''), reverse=True)
-                        for d_data in all_diet_logs[:5]:
+                        for d_data in all_diet_logs[:3]:
                             st.markdown(f"""
                             <div class="card" style="border-left: 5px solid #10b981;">
                                 <b>📅 Date:</b> {d_data.get('date', 'Unknown')}<br>
@@ -555,38 +554,6 @@ elif st.session_state.role == "doctor":
                         st.table(display_notes)
                     else:
                         st.info("No patient notes found.")
-                                             
-                    # --- B. DIET & CALORIES ---
-                    st.markdown("#### 🥗 Diet & Nutrition Logs")
-                    # Retrieve the global diet and journal from session state
-                    # (In a real app, these would be in a CSV, but for now we pull from the linked session)
-                    # The doctor can also see the patient's data based on the currently selected date
-                    current_date_str = st.session_state.current_date.strftime("%Y-%m-%d")
-                    log_id = f"{p_user}_{current_date_str}"
-                    p_diet = st.session_state.user_diet_plans.get(p_user, "No plan assigned.")
-                    p_journal = st.session_state.food_journal.get(log_id, "No intake logged today.")
-                    p_cals = st.session_state.diet_log.get(current_date_str, 0)
-
-                    col_h1, col_h2 = st.columns(2)
-                    col_h1.metric("Today's Intake", f"{p_cals} kcal")
-                    col_h2.write(f"**Patient Journal:** {p_journal}")
-                    
-                    with st.expander("View Assigned Diet Plan"):
-                        st.markdown(p_diet)
-
-                    # --- C. SYMPTOMS & NOTES ---
-                    st.markdown("#### 📝 Patient Notes & Symptoms")
-                    try:
-                        notes_df = load_notes() 
-                        p_notes = notes_df[notes_df["user"] == p_user]
-                        if not p_notes.empty:
-                            st.table(p_notes[["day", "tag", "note", "time"]].rename(columns={"day": "Date"}))
-                        else:
-                            st.info("No patient notes found.")
-                    except Exception as e:
-                        st.error("Error loading notes.")
-            else:
-                st.error("Patient ID not found.")
                 
         
 # ---------------- 3. LOGIN / CREATE (PATIENT) ----------------
@@ -1323,11 +1290,16 @@ elif st.session_state.page == "Diet":
     # FOOD JOURNAL
     # ===================================
     st.markdown(f"### 📝 {current_date_str} Food Journal")
+# Fetch permanent diet plan from your profile document
+    profile_data = db.collection("profiles").document(current_user).get().to_dict() or {}
+    saved_diet_plan = profile_data.get("diet_plan", "No AI plan generated yet.")
 
+    # Fetch existing daily log from 'diet_logs' collection
     log_id = f"{current_user}_{current_date_str}"
-
-    existing_journal = st.session_state.food_journal.get(log_id, "")
-    existing_cals = st.session_state.diet_log.get(current_date_str, 0)
+    existing_log_doc = db.collection("diet_logs").document(log_id).get().to_dict() or {}
+    
+    existing_journal = existing_log_doc.get("meals", "")
+    existing_cals = existing_log_doc.get("calories", 0)
 
     col_j1, col_j2 = st.columns([2, 1])
 
@@ -1346,9 +1318,7 @@ elif st.session_state.page == "Diet":
         )
 
     if st.button("💾 Save Journal & Calories"):
-        if user_meals.strip() == "":
-            st.warning("Please enter what you ate.")
-        else:
+        if user_meals.strip() != "":
             log_data = {
                 "user": current_user,
                 "date": current_date_str,
@@ -1356,16 +1326,9 @@ elif st.session_state.page == "Diet":
                 "calories": int(calories),
                 "timestamp": datetime.now()
             }
-            
-            # Use a unique ID based on user and date so they can update their log for that day
-            doc_id = f"{current_user}_{current_date_str}"
-            db.collection("diet_logs").document(doc_id).set(log_data)
-            
-            # Also update local session state so the dashboard reflects it immediately
-            st.session_state.diet_log[current_date_str] = calories
-            st.session_state.food_journal[log_id] = user_meals
-            
-            st.success(f"✅ Log for {current_date_str} synced to Cloud!")
+            # CHANGE: Save to 'diet_logs' collection with a unique ID per user/day
+            db.collection("diet_logs").document(log_id).set(log_data)
+            st.success("✅ Synced to Cloud!")
             st.rerun()
 
     # ===================================
