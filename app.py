@@ -150,22 +150,26 @@ def load_meds():
 
 
 def save_meds(df, target_user):
-    # 1. Clear existing meds for THIS user ONLY to avoid duplicates
+    # 1. Clear existing meds for this user
     docs = db.collection("medications").where("user", "==", target_user).stream()
     for d in docs:
         d.reference.delete()
 
-    # 2. Filter the dataframe to only include rows for this target user
+    # 2. Re-upload with strict type enforcement
     user_df = df[df["user"] == target_user]
-
-    # 3. Upload to Firestore, ensuring all numeric columns are preserved
     for _, row in user_df.iterrows():
-        data = row.to_dict()
-        # Explicitly ensure these remain numeric
-        data["freq_val"] = int(row["freq_val"])
-        data["dose"] = float(row["dose"])
+        data = {
+            "user": str(row["user"]),
+            "name": str(row["name"]),
+            "dose": float(row["dose"]),
+            "time": str(row["time"]),
+            "food": str(row["food"]),
+            "taken_log": str(row["taken_log"]),
+            "assigned_date": str(row["assigned_date"]),
+            "freq_val": int(float(row["freq_val"])), # Fixes the 'Gap 1' bug
+            "freq_unit": str(row["freq_unit"])
+        }
         db.collection("medications").add(data)
-
 def ask_groq_health_bot(question):
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -498,12 +502,15 @@ elif st.session_state.role == "doctor":
                 with tab3:
                     st.subheader("📊 Comprehensive Patient History")
                     
-                    # A. Medication Table (Cleaned)
+                    # 1. Medication Table (Prescription Focus)
                     df_history = load_meds() 
                     p_meds = df_history[df_history["user"] == p_user].copy()
 
                     if not p_meds.empty:
-                        p_meds["Schedule"] = p_meds.apply(lambda x: f"Every {int(x['freq_val'])} {x['freq_unit']}", axis=1)
+                        # Ensure numeric types for schedule display
+                        p_meds["Schedule"] = p_meds.apply(
+                            lambda x: f"Every {int(float(x['freq_val']))} {x['freq_unit']}", axis=1
+                        )
                         doc_view = p_meds[["assigned_date", "name", "dose", "Schedule"]].rename(columns={
                             "assigned_date": "Date Prescribed",
                             "name": "Medicine",
@@ -514,31 +521,38 @@ elif st.session_state.role == "doctor":
                     else:
                         st.info("No medications prescribed yet.")
                                              
-                    # B. Diet History (Synced from Firestore - Last 5 Days)
-                    st.markdown("#### 🥗 Recent Nutrition Logs (Last 5 Logs)")
-                    diet_docs = db.collection("diet_logs").where("user", "==", p_user).order_by("date", direction=firestore.Query.DESCENDING).limit(5).stream()
+                    # 2. Diet History (Synced from Firestore - Python Sorted to avoid Index Error)
+                    st.markdown("#### 🥗 Recent Nutrition Logs")
                     
-                    diet_found = False
-                    for d_doc in diet_docs:
-                        diet_found = True
-                        d_data = d_doc.to_dict()
-                        st.markdown(f"""
-                        <div class="card" style="border-left: 5px solid #10b981;">
-                            <b>📅 Date:</b> {d_data['date']}<br>
-                            <b>🍽 Meals:</b> {d_data['meals']}<br>
-                            <b>🔥 Calories:</b> {d_data['calories']} kcal
-                        </div>
-                        """, unsafe_allow_html=True)
+                    # Fetch logs for the user without ordering in the query
+                    diet_query = db.collection("diet_logs").where("user", "==", p_user).stream()
                     
-                    if not diet_found:
+                    all_diet_logs = []
+                    for d_doc in diet_query:
+                        all_diet_logs.append(d_doc.to_dict())
+                    
+                    if all_diet_logs:
+                        # Sort by date string descending and show top 5
+                        all_diet_logs.sort(key=lambda x: x.get('date', ''), reverse=True)
+                        for d_data in all_diet_logs[:5]:
+                            st.markdown(f"""
+                            <div class="card" style="border-left: 5px solid #10b981;">
+                                <b>📅 Date:</b> {d_data.get('date', 'Unknown')}<br>
+                                <b>🍽 Meals:</b> {d_data.get('meals', 'No info recorded')}<br>
+                                <b>🔥 Calories:</b> {d_data.get('calories', 0)} kcal
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
                         st.info("No nutrition logs found for this patient.")
 
-                    # C. Symptoms & Notes
+                    # 3. Symptoms & Notes
                     st.markdown("#### 📝 Patient Notes & Symptoms")
                     notes_df = load_notes() 
                     p_notes = notes_df[notes_df["user"] == p_user]
                     if not p_notes.empty:
-                        st.table(p_notes[["day", "tag", "note", "time"]].rename(columns={"day": "Date"}))
+                        # Filter out internal tracking columns for doctor view
+                        display_notes = p_notes[["day", "tag", "note", "time"]].rename(columns={"day": "Date"})
+                        st.table(display_notes)
                     else:
                         st.info("No patient notes found.")
                                              
@@ -1332,17 +1346,27 @@ elif st.session_state.page == "Diet":
         )
 
     if st.button("💾 Save Journal & Calories"):
-        log_data = {
-            "user": current_user,
-            "date": current_date_str,
-            "meals": user_meals,
-            "calories": calories,
-            "timestamp": datetime.now()
-        }
-        # Save to a dedicated 'diet_logs' collection in Firestore
-        db.collection("diet_logs").document(f"{current_user}_{current_date_str}").set(log_data)
-        st.success(f"✅ Log for {current_date_str} saved to Cloud!")
-        st.rerun()
+        if user_meals.strip() == "":
+            st.warning("Please enter what you ate.")
+        else:
+            log_data = {
+                "user": current_user,
+                "date": current_date_str,
+                "meals": user_meals,
+                "calories": int(calories),
+                "timestamp": datetime.now()
+            }
+            
+            # Use a unique ID based on user and date so they can update their log for that day
+            doc_id = f"{current_user}_{current_date_str}"
+            db.collection("diet_logs").document(doc_id).set(log_data)
+            
+            # Also update local session state so the dashboard reflects it immediately
+            st.session_state.diet_log[current_date_str] = calories
+            st.session_state.food_journal[log_id] = user_meals
+            
+            st.success(f"✅ Log for {current_date_str} synced to Cloud!")
+            st.rerun()
 
     # ===================================
     # FEEDBACK
