@@ -1069,23 +1069,11 @@ else:
 if st.session_state.page == "Medications":
     st.subheader("💊 Medication Manager")
     
-    # 1. Load and Clean Data
+# 1. Load and Clean Data
     df = load_meds()
     
-    # Critical: Ensure columns exist and have correct types to prevent UI collapse
-    required_cols = {
-        "freq_val": 1, 
-        "freq_unit": "Days", 
-        "assigned_date": datetime.now().strftime("%Y-%m-%d"),
-        "taken_log": ""
-    }
-    for col, default in required_cols.items():
-        if col not in df.columns:
-            df[col] = default
-
-    # Filter for current logged-in user
-    user_df = df[df["user"] == st.session_state.username].copy()
-    # Filter for current logged-in user without resetting index
+    # Filter for current logged-in user and make a clean copy
+    # We DO NOT use reset_index() here to keep 'i' synced with the master 'df'
     user_df = df[df["user"] == st.session_state.username].copy()
     
     # Convert numeric columns to prevent calculation errors
@@ -1141,7 +1129,8 @@ if st.session_state.page == "Medications":
     found_due = False
     
     if not user_df.empty:
-        for i, row in user_df.iterrows():  # i is the original index
+        # 'i' is the actual index from the original 'df'
+        for i, row in user_df.iterrows():
             try:
                 start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
                 delta_days = (active_date_obj - start_dt).days
@@ -1151,18 +1140,16 @@ if st.session_state.page == "Medications":
                     val = int(row['freq_val'])
                     unit = row['freq_unit']
                     if unit == "Hours": is_due = True
-                    elif unit == "Days":
-                        if delta_days % val == 0: is_due = True
-                    elif unit == "Weeks":
-                        if delta_days % (val * 7) == 0: is_due = True
-                    elif unit == "Months":
-                        if delta_days % (val * 30) == 0: is_due = True
+                    elif unit == "Days" and delta_days % val == 0: is_due = True
+                    elif unit == "Weeks" and delta_days % (val * 7) == 0: is_due = True
+                    elif unit == "Months" and delta_days % (val * 30) == 0: is_due = True
 
                 if is_due:
                     found_due = True
-                    # Cleanly parse logs
-                    current_logs = [d.strip() for d in str(row["taken_log"]).split(",") if len(d.strip()) > 5]
-                    is_taken_today = current_date_str in current_logs
+                    # Parse logs and remove any empty strings or 'nan'
+                    raw_logs = str(row["taken_log"]).split(",")
+                    logs = {d.strip() for d in raw_logs if len(d.strip()) > 5}
+                    is_taken_today = current_date_str in logs
                     
                     col1, col2 = st.columns([6,1])
                     status = "✅ Taken" if is_taken_today else "⏳ Pending"
@@ -1177,15 +1164,11 @@ if st.session_state.page == "Medications":
                     
                     if not is_taken_today:
                         if col2.button("✔️", key=f"tick_{i}", use_container_width=True):
-                            # Use a set to prevent duplication
-                            log_set = set(current_logs)
-                            log_set.add(current_date_str)
-                            
-                            # Update the MASTER dataframe 'df' at original index 'i'
-                            df.at[i, "taken_log"] = ",".join(list(log_set))
+                            logs.add(current_date_str)
+                            df.at[i, "taken_log"] = ",".join(list(logs))
                             save_meds(df, st.session_state.username) 
                             st.rerun()
-            except:
+            except Exception as e:
                 continue
 
 
@@ -1217,20 +1200,18 @@ if st.session_state.page == "Medications":
 # 6. Management (Delete Records)
     st.markdown("### 📋 Management (All Prescriptions)")
     if not user_df.empty:
-        for i, row in user_df.iterrows(): # i is the original index
+        for i, row in user_df.iterrows():
             col1, col2 = st.columns([6,1])
             assigned_dt = row.get("assigned_date", "N/A")
 
             col1.markdown(f"""
             <div class="card" style="border-left:5px solid #38bdf8;">
                 <b>{row['name']}</b> ({row['dose']}mg)<br>
-                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small><br>
                 <small>📅 Prescribed On: {assigned_dt}</small>
             </div>
             """, unsafe_allow_html=True)
 
             if col2.button("❌", key=f"del_{i}", use_container_width=True):
-                # Drop directly from master df using index i
                 df = df.drop(index=i)
                 save_meds(df, st.session_state.username)
                 st.rerun()
