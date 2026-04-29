@@ -131,9 +131,7 @@ def check_login(username, password):
     return False
 
 def load_meds():
-    docs = db.collection("medications").where(
-    "user", "==", st.session_state.username
-).stream()
+    docs = db.collection("medications").stream()
     rows = []
     for doc in docs:
         rows.append(doc.to_dict())
@@ -918,7 +916,17 @@ else:
     # ---------------- DASHBOARD (GLASS UI) ----------------
     elif st.session_state.page == "Dashboard":
         df = load_meds()
+        # Ensure permanent medicine ID exists in MAIN dataframe
+        if "med_id" not in df.columns:
+            df["med_id"] = df.index.astype(str)
+        else:
+            df["med_id"] = df["med_id"].astype(str)
         user_df = df[df["user"] == st.session_state.username]
+                # create permanent unique row id
+        if "med_id" not in user_df.columns:
+            user_df["med_id"] = user_df.index.astype(str)
+
+        user_df = user_df.reset_index(drop=True)
         NOTE_FILE = "notes.csv"
         
         # ---------------- CALCULATIONS ----------------
