@@ -492,12 +492,15 @@ elif st.session_state.role == "doctor":
                             
                 with tab2:
                     st.subheader("Assign Diet Plan")
-                    diet_content = st.text_area("Write/Paste Diet Plan", key="doc_diet_text")
+                    # Fetch existing plan to show in the text area
+                    current_plan = target_patient.iloc[0].get("diet_plan", "")
+                    diet_content = st.text_area("Write/Paste Diet Plan", value=current_plan, key="doc_diet_text")
+                    
                     if st.button("Sync Diet to Patient Portal", key="doc_sync_diet"):
-                        if "user_diet_plans" not in st.session_state:
-                            st.session_state.user_diet_plans = {}
-                        st.session_state.user_diet_plans[p_user] = diet_content
-                        st.success("Diet plan updated for patient.")
+                        # Update the 'diet_plan' field inside the patient's profile in Firestore
+                        db.collection("profiles").document(p_user).update({"diet_plan": diet_content})
+                        st.success(f"Diet plan permanently synced for {p_user}")
+                        st.rerun()
                 with tab3:
                     st.subheader("📊 Comprehensive Patient History")
                     
@@ -1342,37 +1345,43 @@ elif st.session_state.page == "Diet":
         else:
             st.success(f"✅ Healthy intake ({calories} kcal)")
 
-    # ===================================
-    # HISTORY DISPLAY
+# ===================================
+    # HISTORY DISPLAY (FETCH FROM CLOUD)
     # ===================================
     st.markdown("---")
     st.subheader("📜 Food Journal History")
 
-    found = False
-    for key in sorted(st.session_state.food_journal.keys(), reverse=True):
-            if key.startswith(current_user + "_"):
-                date_part = key.replace(current_user + "_", "")
-                meal_text = st.session_state.food_journal[key]
-                cal_val = st.session_state.diet_log.get(date_part, 0)
+    # Fetch all logs for this user from Firestore
+    history_query = db.collection("diet_logs").where("user", "==", current_user).stream()
+    
+    cloud_history = []
+    for doc in history_query:
+        cloud_history.append(doc.to_dict())
 
-                col_h1, col_h2 = st.columns([6, 1])
-                col_h1.markdown(f"""
-                    <div class="card">
-                        <h4>📅 Date: {date_part}</h4>
-                        <p><b>🍽 Meals:</b> {meal_text}</p>
-                        <p><b>🔥 Calories:</b> {cal_val} kcal</p>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-                if col_h2.button("🗑️", key=f"del_diet_{key}"):
-                    del st.session_state.food_journal[key]
-                    if date_part in st.session_state.diet_log:
-                        del st.session_state.diet_log[date_part]
-                    st.rerun()
-                found = True
-
-    if not found:
-        st.info("No food history available yet.")
+    if cloud_history:
+        # Sort by date descending
+        cloud_history.sort(key=lambda x: x.get('date', ''), reverse=True)
+        
+        for entry in cloud_history:
+            d_part = entry.get('date', 'Unknown')
+            m_text = entry.get('meals', '')
+            c_val = entry.get('calories', 0)
+            
+            col_h1, col_h2 = st.columns([6, 1])
+            col_h1.markdown(f"""
+                <div class="card">
+                    <h4>📅 Date: {d_part}</h4>
+                    <p><b>🍽 Meals:</b> {m_text}</p>
+                    <p><b>🔥 Calories:</b> {c_val} kcal</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Delete button (Now deletes from Cloud)
+            if col_h2.button("🗑️", key=f"del_cloud_{d_part}"):
+                db.collection("diet_logs").document(f"{current_user}_{d_part}").delete()
+                st.rerun()
+    else:
+        st.info("No food history available in the cloud yet.")
 
 # ---------------- NOTES PANEL (AI UPGRADED) ----------------
 elif st.session_state.page == "Notes":
