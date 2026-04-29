@@ -1085,7 +1085,8 @@ if st.session_state.page == "Medications":
 
     # Filter for current logged-in user
     user_df = df[df["user"] == st.session_state.username].copy()
-    user_df = user_df.reset_index()
+    # Filter for current logged-in user without resetting index
+    user_df = df[df["user"] == st.session_state.username].copy()
     
     # Convert numeric columns to prevent calculation errors
     user_df["dose"] = pd.to_numeric(user_df["dose"], errors="coerce").fillna(0)
@@ -1175,20 +1176,20 @@ if st.session_state.page == "Medications":
                     """, unsafe_allow_html=True)
                     
                     if not is_taken_today:
-                        # Tick button only appears if not taken
-                        if col2.button("✔️", key=f"btn_{i}", use_container_width=True):
-                            # Correctly update the original dataframe 'df' using the tracked index 'i'
-                            existing_logs = str(df.at[i, "taken_log"]).split(",")
-                            logs = [d.strip() for d in existing_logs if len(d.strip()) > 5]
+                        # Use the original DataFrame index 'i' directly from iterrows()
+                        if col2.button("✔️", key=f"tick_{i}", use_container_width=True):
+                            # Get the current string from the master 'df'
+                            raw_val = str(df.at[i, "taken_log"])
                             
-                            if current_date_str not in logs:
-                                logs.append(current_date_str)
-                                new_log_str = ",".join(logs)
-                                df.at[i, "taken_log"] = new_log_str
-                                
-                                # Save the updated original dataframe
-                                save_meds(df, st.session_state.username) 
-                                st.rerun()
+                            # Use a set to prevent any duplicate days
+                            existing_days = {d.strip() for d in raw_val.split(",") if len(d.strip()) > 5}
+                            existing_days.add(current_date_str)
+                            
+                            # Update master 'df'
+                            df.at[i, "taken_log"] = ",".join(list(existing_days))
+                            
+                            save_meds(df, st.session_state.username)
+                            st.rerun()
             except:
                 continue
 
@@ -1219,25 +1220,23 @@ if st.session_state.page == "Medications":
         st.caption("Complete your daily intake to see trends.") 
 
     # 6. Management (Delete Records)
+    # 6. Management (Delete Records)
     st.markdown("### 📋 Management (All Prescriptions)")
     if not user_df.empty:
-        for _, row in user_df.iterrows():
-            # 'i' corresponds to the index in the original 'df' 
-            i = row["index"]
-
+        # Use .index to get the actual row position from the original 'df'
+        for i in user_df.index:
+            row = user_df.loc[i]
             col1, col2 = st.columns([6,1])
-            assigned_dt = row.get("assigned_date", "N/A")
-
+            
             col1.markdown(f"""
             <div class="card" style="border-left:5px solid #38bdf8;">
                 <b>{row['name']}</b> ({row['dose']}mg)<br>
-                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small><br>
-                <small>📅 Prescribed On: {assigned_dt}</small>
+                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small>
             </div>
             """, unsafe_allow_html=True)
 
-            # Use the original index 'i' to ensure the correct row is dropped
-            if col2.button("❌", key=f"del_{i}", use_container_width=True):
+            if col2.button("❌", key=f"delete_med_{i}", use_container_width=True):
+                # Dropping from master 'df' using the absolute index
                 df = df.drop(index=i)
                 save_meds(df, st.session_state.username)
                 st.rerun()
