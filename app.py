@@ -131,7 +131,9 @@ def check_login(username, password):
     return False
 
 def load_meds():
-    docs = db.collection("medications").stream()
+    docs = db.collection("medications").where(
+    "user", "==", st.session_state.username
+).stream()
     rows = []
     for doc in docs:
         rows.append(doc.to_dict())
@@ -1064,14 +1066,14 @@ else:
         else:
             st.info("No adherence data yet")
             
-# ---------------- MEDICATIONS PAGE (OPTIMIZED) ----------------
+# ---------------- MEDICATIONS PAGE (COMPLETE & FIXED) ----------------
 if st.session_state.page == "Medications":
     st.subheader("💊 Medication Manager")
     
-    # 1. Load and Pre-process Data
+    # 1. Load and Clean Data
     df = load_meds()
     
-    # Ensure columns exist in the master DF
+    # Critical: Ensure columns exist and have correct types to prevent UI collapse
     required_cols = {
         "freq_val": 1, 
         "freq_unit": "Days", 
@@ -1082,12 +1084,19 @@ if st.session_state.page == "Medications":
         if col not in df.columns:
             df[col] = default
 
-    # Clean master DF types (Critical for math operations)
-    df["dose"] = pd.to_numeric(df["dose"], errors="coerce").fillna(0)
-    df["freq_val"] = pd.to_numeric(df["freq_val"], errors="coerce").fillna(1)
+    # Filter for current logged-in user
+    user_df = df[df["user"] == st.session_state.username].copy()
+
+    # create permanent unique row id
+    if "med_id" not in user_df.columns:
+        user_df["med_id"] = user_df.index.astype(str)
+
+    user_df = user_df.reset_index(drop=True)
     
-    # Filter for user while PRESERVING the original index (idx)
-    user_df = df[df["user"] == st.session_state.username]
+    # Convert numeric columns to prevent calculation errors
+    user_df["dose"] = pd.to_numeric(user_df["dose"], errors="coerce").fillna(0)
+    user_df["freq_val"] = pd.to_numeric(user_df["freq_val"], errors="coerce").fillna(1)
+    
     current_daily_total = user_df["dose"].sum()
 
     # 2. Add New Medicine Section
@@ -1108,38 +1117,60 @@ if st.session_state.page == "Medications":
         food = st.selectbox("Food", ["Before Food","After Food"])
         
         if st.button("Add Medicine", type="primary"):
-            if not name.strip():
+            if name.strip() == "":
                 st.error("Please enter a medicine name.")
             elif current_daily_total + dose > 1000:
                 st.error(f"⚠️ Limit Reached! Daily maximum is 1000mg.")
             else:
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                new_data = {
-                    "user": st.session_state.username, "name": name, "dose": dose, 
-                    "time": time, "food": food, "taken_log": "", 
-                    "assigned_date": today_str, "freq_val": f_val, "freq_unit": f_unit
-                }
-                new_row = pd.DataFrame([new_data])
+                import uuid
+
+                new_row = pd.DataFrame([[
+                    str(uuid.uuid4()),
+                    st.session_state.username,
+                    name,
+                    dose,
+                    time,
+                    food,
+                    "",
+                    today_str,
+                    f_val,
+                    f_unit
+                ]], columns=[
+                    "med_id",
+                    "user",
+                    "name",
+                    "dose",
+                    "time",
+                    "food",
+                    "taken_log",
+                    "assigned_date",
+                    "freq_val",
+                    "freq_unit"
+                ])
                 df = pd.concat([df, new_row], ignore_index=True)
+                # FIX: Pass the username here
                 save_meds(df, st.session_state.username) 
                 st.success(f"Added {name} successfully!")
                 st.rerun()
     
     st.markdown("---")
     
-    # 3. DATE SELECTION
+# ---------------- 3. DATE SELECTION ----------------
+    # Just show the calendar
     current_date_str = date_navigator("meds") 
     active_date_obj = st.session_state.current_date 
 
-    # 4. MEDICINES DUE ON SELECTED DATE
+    # ---------------- 4. MEDICINES DUE ON SELECTED DATE ----------------
     st.markdown(f"### 🟢 Due on {current_date_str}")
     found_due = False
     
     if not user_df.empty:
-        for idx, row in user_df.iterrows():
+        for _, row in user_df.iterrows():
+            med_id = str(row["med_id"])
             try:
-                # Calculate if due
-                start_dt = pd.to_datetime(row['assigned_date']).date()
+                # Math based on the date picked in the calendar
+                start_dt = datetime.strptime(str(row['assigned_date']), "%Y-%m-%d").date()
                 delta_days = (active_date_obj - start_dt).days
                 
                 is_due = False
@@ -1147,14 +1178,20 @@ if st.session_state.page == "Medications":
                     val = int(row['freq_val'])
                     unit = row['freq_unit']
                     if unit == "Hours": is_due = True
-                    elif unit == "Days": is_due = (delta_days % val == 0)
-                    elif unit == "Weeks": is_due = (delta_days % (val * 7) == 0)
-                    elif unit == "Months": is_due = (delta_days % (val * 30) == 0)
+                    elif unit == "Days":
+                        if delta_days % val == 0: is_due = True
+                    elif unit == "Weeks":
+                        if delta_days % (val * 7) == 0: is_due = True
+                    elif unit == "Months":
+                        if delta_days % (val * 30) == 0: is_due = True
 
                 if is_due:
                     found_due = True
-                    raw_log = str(row.get("taken_log", "")) if not pd.isna(row.get("taken_log")) else ""
-                    logs = [d.strip() for d in raw_log.split(",") if d.strip()]
+                    raw_log = row.get("taken_log", "")
+                    if pd.isna(raw_log):
+                        raw_log = ""
+
+                    logs = [d.strip() for d in str(raw_log).split(",") if d.strip()]
                     is_taken_today = current_date_str in logs
                     
                     col1, col2 = st.columns([6,1])
@@ -1162,58 +1199,87 @@ if st.session_state.page == "Medications":
                     card_color = "#22c55e" if is_taken_today else "#eab308"
                     
                     col1.markdown(f"""
-                        <div class="card" style="border-left: 5px solid {card_color}; padding:10px; background:#f9f9f9; border-radius:5px; margin-bottom:10px;">
-                            💊 <b>{row['name']}</b> — {row['dose']}mg<br>
-                            <small>🔄 Every {val} {unit} | 📌 {status}</small>
-                        </div>
+                    <div class="card" style="border-left: 5px solid {card_color};">
+                        💊 <b>{row['name']}</b> — {row['dose']}mg<br>
+                        🔄 Schedule: Every {val} {unit} | 📌 Status: {status}
+                    </div>
                     """, unsafe_allow_html=True)
                     
                     if not is_taken_today:
-                        # KEY FIX: Use the 'idx' from iterrows to target the correct row in master 'df'
-                        if col2.button("✔️", key=f"tk_{idx}_{current_date_str}"):
-                            logs.append(current_date_str)
-                            df.at[idx, "taken_log"] = ",".join(logs)
+                        # Tick button only appears if not taken
+                        if col2.button("✔️", key=f"tick_{med_id}_{current_date_str}", use_container_width=True):
+
+                            row_index = df[df["med_id"].astype(str) == med_id].index[0]
+
+                            raw_log = df.at[row_index, "taken_log"]
+
+                            if pd.isna(raw_log):
+                                raw_log = ""
+
+                            logs = [d.strip() for d in str(raw_log).split(",") if d.strip()]
+
+                            if current_date_str not in logs:
+                                logs.append(current_date_str)
+
+                            df.at[row_index, "taken_log"] = ",".join(logs)
+
                             save_meds(df, st.session_state.username)
+
                             st.rerun()
-            except Exception as e:
+            except:
                 continue
+
+
 
     if not found_due:
         st.info("No medications scheduled for this date.")
 
     # 5. Adherence Graph
     st.markdown("---")
-    st.markdown("### 📊 Adherence Trend")
+    st.markdown("### 📊 Adherence & Dosage Trend")
     
     graph_data = []
-    for _, row in user_df.iterrows():
-        logs = str(row["taken_log"]).split(",")
-        for d in logs:
-            d = d.strip()
-            if len(d) > 5: 
-                graph_data.append({"day": d, "dose": row["dose"]})
+    if not user_df.empty:
+        for _, row in user_df.iterrows():
+            logs = str(row["taken_log"]).split(",")
+            for d in logs:
+                d = d.strip()
+                if len(d) > 5: # Valid YYYY-MM-DD check
+                    graph_data.append({"day": d, "dose": row["dose"]})
     
     if graph_data:
         graph_df = pd.DataFrame(graph_data)
+        # Sum dosages per day
         chart_pivot = graph_df.groupby("day")["dose"].sum()
         st.line_chart(chart_pivot)
     else:
-        st.caption("Log your intake to see trends.") 
+        st.caption("Complete your daily intake to see trends.") 
 
     # 6. Management (Delete Records)
-    st.markdown("### 📋 All Prescriptions")
+    st.markdown("### 📋 Management (All Prescriptions)")
     if not user_df.empty:
-        for idx, row in user_df.iterrows():
+        for _, row in user_df.iterrows():
+            med_id = str(row["med_id"])
+
             col1, col2 = st.columns([6,1])
+            assigned_dt = row.get("assigned_date", "N/A")
+
             col1.markdown(f"""
-                <div class="card" style="border-left:5px solid #38bdf8; padding:10px; margin-bottom:5px; background:#f0f9ff;">
-                    <b>{row['name']}</b> ({row['dose']}mg) — <i>Every {row['freq_val']} {row['freq_unit']}</i>
-                </div>
+            <div class="card" style="border-left:5px solid #38bdf8;">
+                <b>{row['name']}</b> ({row['dose']}mg)<br>
+                <small>🔄 Interval: Every {row['freq_val']} {row['freq_unit']}</small><br>
+                <small>📅 Prescribed On: {assigned_dt}</small>
+            </div>
             """, unsafe_allow_html=True)
 
-            if col2.button("❌", key=f"del_{idx}"):
-                df = df.drop(index=idx)
+            if col2.button("❌", key=f"del_{med_id}"):
+
+                row_index = df[df["med_id"].astype(str) == med_id].index[0]
+
+                df = df.drop(index=row_index)
+
                 save_meds(df, st.session_state.username)
+
                 st.rerun()
                 
 # ---------------- DIET PANEL (STABLE GROQ VERSION) ----------------
