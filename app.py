@@ -1161,10 +1161,11 @@ if st.session_state.page == "Medications":
                     col1.markdown(f"""
                     <div class="card" style="border-left: 5px solid {card_color};">
                         💊 <b>{row['name']}</b> — {row['dose']}mg<br>
+                        🕒 <i>{row['time']} ({row['food']})</i><br>
                         🔄 Schedule: Every {val} {unit} | 📌 Status: {status}
                     </div>
                     """, unsafe_allow_html=True)
-                    
+                                        
                     if not is_taken_today:
                         if col2.button("✔️", key=f"tick_{i}", use_container_width=True):
                             logs.add(current_date_str)
@@ -1210,6 +1211,7 @@ if st.session_state.page == "Medications":
             col1.markdown(f"""
             <div class="card" style="border-left:5px solid #38bdf8;">
                 <b>{row['name']}</b> ({row['dose']}mg)<br>
+                🍽️ Take <b>{row['food']}</b> in the <b>{row['time']}</b><br>
                 <small>📅 Prescribed On: {assigned_dt}</small>
             </div>
             """, unsafe_allow_html=True)
